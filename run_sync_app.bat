@@ -1,4 +1,5 @@
 @echo off
-cd /d "D:\WFO-fractionation-system"
-call scada_env\Scripts\activate
-streamlit run scada_ui_app.py
+cd /d "G:\Monika\WFO Fractionation System\scada-analytics-platform"
+echo Starting Streamlit app...
+streamlit run sqlserver_to_postgres_app.py
+pause
