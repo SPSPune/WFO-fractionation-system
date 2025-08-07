@@ -1,5 +1,20 @@
 @echo off
-cd /d "G:\Monika\WFO Fractionation System\scada-analytics-platform"
-echo Starting Streamlit app...
-python -m streamlit run sqlserver_to_postgres_app.py
+echo Starting SCADA Sync Streamlit App...
+echo ---------------------------------------
+
+:: Navigate to the project folder (update path if needed)
+cd /d "%~dp0"
+
+:: Set Python path if needed, otherwise uses default
+set PYTHON_EXEC=python
+
+:: Install required Python packages
+echo Installing dependencies...
+%PYTHON_EXEC% -m pip install --upgrade pip
+%PYTHON_EXEC% -m pip install -r requirements.txt
+
+:: Start Streamlit app
+echo Launching app...
+%PYTHON_EXEC% -m streamlit run sqlserver_to_postgres_app.py
+
 pause
