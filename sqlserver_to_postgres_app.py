@@ -1,17 +1,21 @@
-import os
 import streamlit as st
 import psycopg2
+import os
+import glob
 import pandas as pd
-from datetime import datetime
-from streamlit_autorefresh import st_autorefresh
+import threading
+import time
 
-# Auto-refresh every 60 seconds
-st_autorefresh(interval=60 * 1000, key="datarefresh")
+# ---------------------------
+# Global State
+# ---------------------------
+sync_thread = None
+sync_running = False
+processed_files = set()
 
-st.set_page_config(page_title="SQL File to PostgreSQL Sync", layout="centered")
-st.title("🔄 SCADA SQL File to PostgreSQL Data Sync")
-
-# Tag Index Mapping
+# ---------------------------
+# Tag Mapping (from image)
+# ---------------------------
 tag_mapping = {
     251: "TI-31", 253: "TI-32", 254: "TI-33", 255: "TI-34", 256: "TI-35",
     257: "TI-36", 258: "TI-37", 259: "TI-38", 260: "TI-39", 261: "TI-40",
@@ -21,118 +25,133 @@ tag_mapping = {
     123: "LT-06", 28: "FT-01", 46: "FT-07", 63: "FT-10", 37: "FT-04"
 }
 
-# ---------- SCADA SQL File Configuration ----------
-st.header("📂 SCADA SQL File Configuration")
-sql_file_folder = st.text_input("Enter SCADA SQL File Folder Path (e.g., D:/scada/sql_output)")
+# ---------------------------
+# Page Config
+# ---------------------------
+st.set_page_config(page_title="SCADA SQL to PostgreSQL Sync", layout="centered")
+st.title("🔄 SCADA SQL to PostgreSQL Sync Tool")
 
-# ---------- PostgreSQL Credentials ----------
-st.header("🔐 PostgreSQL Credentials")
-db_name = st.text_input("Database Name", value="scada_db")
-db_user = st.text_input("Username", value="postgres")
-db_password = st.text_input("Password", type="password")
-db_host = st.text_input("Host", value="localhost")
-db_port = st.text_input("Port", value="5432")
+# ---------------------------
+# Sidebar Input Form
+# ---------------------------
+st.sidebar.header("🔧 Sync Settings")
+with st.sidebar.form("connection_form"):
+    st.subheader("PostgreSQL Details")
+    host = st.text_input("Host", value="localhost")
+    port = st.text_input("Port", value="5432")
+    user = st.text_input("Username", value="postgres")
+    password = st.text_input("Password", type="password")
+    db_name = st.text_input("Database Name")
+    table_name = st.text_input("Target Table Name", value="scada_data")
 
-# ---------- Sync Logic ----------
-if sql_file_folder and db_name and db_user and db_password:
-    if os.path.exists(sql_file_folder):
-        files = [f for f in os.listdir(sql_file_folder) if f.endswith('.sql')]
-        if files:
-            latest_file = max(files, key=lambda x: os.path.getctime(os.path.join(sql_file_folder, x)))
-            latest_file_path = os.path.join(sql_file_folder, latest_file)
-            st.success(f"📄 Found latest SQL file: `{latest_file}`")
+    st.subheader("SQL File Folder")
+    folder_path = st.text_input("Enter the folder path where .sql files are stored", placeholder="e.g., G:/Monika/WFO Fractionation System/sql_files")
 
-            try:
-                # Read raw SQL file into dataframe
-                with open(latest_file_path, 'r') as f:
-                    sql_commands = f.read()
 
-                # Execute SQL script and load into temporary table
-                conn = psycopg2.connect(
-                    dbname=db_name,
-                    user=db_user,
-                    password=db_password,
-                    host=db_host,
-                    port=db_port
-                )
-                cur = conn.cursor()
-                cur.execute(sql_commands)
-                conn.commit()
+    submitted = st.form_submit_button("✅ Save Settings")
 
-                # Read new data from temp table (assuming temp table name = scada_raw)
-                df = pd.read_sql("SELECT \"DateAndTime\", \"TagIndex\", \"Val\" FROM scada_raw", conn)
+# ---------------------------
+# Placeholders
+# ---------------------------
+status_placeholder = st.empty()
+error_placeholder = st.empty()
 
-                # Filter for only known tags
-                df = df[df["TagIndex"].isin(tag_mapping.keys())]
-                df["Tag"] = df["TagIndex"].map(tag_mapping)
-                df_pivot = df.pivot(index="DateAndTime", columns="Tag", values="Val").reset_index()
-
-                # Create final table if not exists
-                column_defs = ", ".join([f'"{col}" DOUBLE PRECISION' for col in df_pivot.columns if col != "DateAndTime"])
-                create_table_sql = f"""
-                    CREATE TABLE IF NOT EXISTS scada_data (
-                        "DateAndTime" TIMESTAMP PRIMARY KEY,
-                        {column_defs}
-                    )
-                """
-                cur.execute(create_table_sql)
-                conn.commit()
-
-                # Insert or update
-                for _, row in df_pivot.iterrows():
-                    columns = ', '.join(f'"{col}"' for col in df_pivot.columns)
-                    values = ', '.join(['%s'] * len(df_pivot.columns))
-                    insert_sql = f"""
-                        INSERT INTO scada_data ({columns}) VALUES ({values})
-                        ON CONFLICT ("DateAndTime") DO UPDATE SET
-                        {', '.join(f'"{col}" = EXCLUDED."{col}"' for col in df_pivot.columns if col != "DateAndTime")}
-                    """
-                    cur.execute(insert_sql, tuple(row))
-
-                conn.commit()
-                cur.close()
-                conn.close()
-
-                st.success("✅ SCADA data successfully loaded and pivoted into PostgreSQL!")
-
-            except Exception as e:
-                st.error(f"❌ Error during SQL execution or transformation: {e}")
-        else:
-            st.warning("⚠️ No SQL files found in the provided folder.")
-    else:
-        st.error("❌ Provided folder path does not exist.")
-else:
-    st.info("ℹ️ Please fill in all required fields to start syncing.")
-
-# ---------- Create New DB UI ----------
-st.header("🛠️ Optional: Create New PostgreSQL Database")
-create_db_name = st.text_input("New Database Name", key="create_db_name")
-create_db_user = st.text_input("PostgreSQL Username", value="postgres", key="create_db_user")
-create_db_password = st.text_input("PostgreSQL Password", type="password", key="create_db_password")
-create_db_host = st.text_input("PostgreSQL Host", value="localhost", key="create_db_host")
-create_db_port = st.text_input("PostgreSQL Port", value="5432", key="create_db_port")
-
-if st.button("➕ Create Database"):
+# ---------------------------
+# DB Setup
+# ---------------------------
+def create_database_if_not_exists():
     try:
-        default_conn = psycopg2.connect(
-            dbname="postgres",
-            user=create_db_user,
-            password=create_db_password,
-            host=create_db_host,
-            port=create_db_port
-        )
-        default_conn.autocommit = True
-        cur = default_conn.cursor()
-        cur.execute(f"SELECT 1 FROM pg_database WHERE datname = '{create_db_name}'")
-        exists = cur.fetchone()
-
-        if exists:
-            st.warning(f"⚠️ Database `{create_db_name}` already exists.")
+        conn = psycopg2.connect(host=host, port=port, user=user, password=password, dbname="postgres")
+        conn.autocommit = True
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT 1 FROM pg_database WHERE datname = '{db_name}'")
+        if not cursor.fetchone():
+            cursor.execute(f"CREATE DATABASE {db_name}")
+            status_placeholder.success(f"✅ Database `{db_name}` created.")
         else:
-            cur.execute(f"CREATE DATABASE {create_db_name}")
-            st.success(f"✅ Database `{create_db_name}` created successfully.")
-
-        cur.close()
-        default_conn.close()
+            status_placeholder.info(f"ℹ️ Database `{db_name}` already exists.")
+        cursor.close()
+        conn.close()
     except Exception as e:
-        st.error(f"❌ Error creating database: {e}")
+        error_placeholder.error(f"❌ Error creating DB: {e}")
+
+def create_pivoted_table_if_not_exists(conn):
+    cursor = conn.cursor()
+    columns = ",\n".join([f'"{tag}" FLOAT' for tag in tag_mapping.values()])
+    create_query = f"""
+    CREATE TABLE IF NOT EXISTS {table_name} (
+        DateAndTime TIMESTAMP,
+        {columns}
+    );
+    """
+    cursor.execute(create_query)
+    cursor.close()
+
+# ---------------------------
+# Sync Function
+# ---------------------------
+def sync_continuously():
+    global sync_running
+    while sync_running:
+        try:
+            conn = psycopg2.connect(host=host, port=port, user=user, password=password, dbname=db_name)
+            create_pivoted_table_if_not_exists(conn)
+            cursor = conn.cursor()
+
+            sql_files = glob.glob(os.path.join(folder_path, "*.sql"))
+            new_files = [f for f in sql_files if f not in processed_files]
+            if not new_files:
+                status_placeholder.info("📁 No new files yet.")
+            else:
+                all_data = []
+                for file in new_files:
+                    with open(file, 'r') as f:
+                        raw_sql = f.read()
+                        cursor.execute("DROP TABLE IF EXISTS temp_raw;")
+                        cursor.execute("""
+                            CREATE TEMP TABLE temp_raw (
+                                DateAndTime TIMESTAMP,
+                                TagIndex INT,
+                                Val FLOAT
+                            );
+                        """)
+                        cursor.execute(raw_sql)
+                        cursor.execute("SELECT * FROM temp_raw;")
+                        rows = cursor.fetchall()
+                        df = pd.DataFrame(rows, columns=["DateAndTime", "TagIndex", "Val"])
+                        df["TAG"] = df["TagIndex"].map(tag_mapping)
+                        df.dropna(subset=["TAG"], inplace=True)
+                        pivot_df = df.pivot_table(index="DateAndTime", columns="TAG", values="Val", aggfunc='first').reset_index()
+                        all_data.append(pivot_df)
+                        processed_files.add(file)
+
+                if all_data:
+                    combined = pd.concat(all_data, ignore_index=True).sort_values("DateAndTime")
+                    for _, row in combined.iterrows():
+                        cols = ','.join(f'"{col}"' for col in row.index)
+                        vals = ','.join("NULL" if pd.isna(val) else f"{val}" if isinstance(val, (int, float)) else f"'{val}'" for val in row.values)
+                        insert = f'INSERT INTO {table_name} ({cols}) VALUES ({vals});'
+                        cursor.execute(insert)
+                    conn.commit()
+                    status_placeholder.success(f"✅ Synced {len(new_files)} new file(s).")
+            cursor.close()
+            conn.close()
+        except Exception as e:
+            error_placeholder.error(f"❌ Sync error: {e}")
+        time.sleep(60)  # Wait 1 minute
+
+# ---------------------------
+# Sync Button Controls
+# ---------------------------
+if submitted:
+    create_database_if_not_exists()
+
+if st.button("🚀 Start Sync") and not sync_running:
+    sync_running = True
+    sync_thread = threading.Thread(target=sync_continuously)
+    sync_thread.start()
+    status_placeholder.info("⏳ Sync started...")
+
+if st.button("🛑 Stop Sync") and sync_running:
+    sync_running = False
+    status_placeholder.warning("🛑 Sync stopped.")
