@@ -17,10 +17,11 @@ if 'sync_thread' not in st.session_state:
     st.session_state.sync_thread = None
 
 # ---------------------------
-# Tag Mapping
+# Tag Mapping (FIXED)
 # ---------------------------
+# The duplicate "TI-35" entry has been resolved
 tag_mapping = {
-    251: "TI-31", 253: "TI-32", 254: "TI-33", 255: "TI-35", 256: "TI-35",
+    251: "TI-31", 253: "TI-32", 254: "TI-33", 255: "TI-35", 256: "TI-35-A",
     257: "TI-36", 258: "TI-37", 259: "TI-38", 260: "TI-39", 261: "TI-40",
     270: "TI-41", 271: "TI-42", 273: "TI-43", 274: "TI-44", 275: "TI-45",
     272: "TI-42A", 279: "TI-54", 199: "TI-107", 201: "TI-109", 296: "TI-73A",
