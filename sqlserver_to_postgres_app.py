@@ -47,7 +47,6 @@ with st.sidebar.form("connection_form"):
     st.subheader("SQL File Folder")
     folder_path = st.text_input("Enter the folder path where .sql files are stored", placeholder="e.g., G:/Monika/WFO Fractionation System/sql_files")
 
-
     submitted = st.form_submit_button("✅ Save Settings")
 
 # ---------------------------
@@ -59,7 +58,8 @@ error_placeholder = st.empty()
 # ---------------------------
 # DB Setup
 # ---------------------------
-def create_database_if_not_exists():
+def create_database_if_not_exists(host, port, user, password, db_name):
+    """Tries to connect to the default 'postgres' database to create a new one."""
     try:
         conn = psycopg2.connect(host=host, port=port, user=user, password=password, dbname="postgres")
         conn.autocommit = True
@@ -67,15 +67,20 @@ def create_database_if_not_exists():
         cursor.execute(f"SELECT 1 FROM pg_database WHERE datname = '{db_name}'")
         if not cursor.fetchone():
             cursor.execute(f"CREATE DATABASE {db_name}")
-            status_placeholder.success(f"✅ Database `{db_name}` created.")
+            status_placeholder.success(f"✅ Database `{db_name}` created successfully.")
         else:
             status_placeholder.info(f"ℹ️ Database `{db_name}` already exists.")
         cursor.close()
         conn.close()
+    except psycopg2.OperationalError as e:
+        error_placeholder.error(f"❌ Cannot connect to PostgreSQL to create the database. Please check your **Host, Port, Username, and Password**. Error: {e}")
+        st.stop()
     except Exception as e:
-        error_placeholder.error(f"❌ Error creating DB: {e}")
+        error_placeholder.error(f"❌ An unexpected error occurred while creating the database. Error: {e}")
+        st.stop()
 
-def create_pivoted_table_if_not_exists(conn):
+def create_pivoted_table_if_not_exists(conn, table_name, tag_mapping):
+    """Creates the target table if it doesn't exist."""
     cursor = conn.cursor()
     columns = ",\n".join([f'"{tag}" FLOAT' for tag in tag_mapping.values()])
     create_query = f"""
@@ -84,29 +89,45 @@ def create_pivoted_table_if_not_exists(conn):
         {columns}
     );
     """
-    cursor.execute(create_query)
-    cursor.close()
+    try:
+        cursor.execute(create_query)
+        conn.commit()
+        status_placeholder.success(f"✅ Table `{table_name}` verified/created successfully.")
+    except Exception as e:
+        error_placeholder.error(f"❌ Error creating the table `{table_name}`. Please check if your **table name is valid** and if the database user has **permissions**. Error: {e}")
+    finally:
+        cursor.close()
 
 # ---------------------------
 # Sync Function
 # ---------------------------
-def sync_continuously():
+def sync_continuously(host, port, user, password, db_name, table_name, folder_path, tag_mapping):
+    """The main continuous sync loop."""
     global sync_running
     while sync_running:
         try:
+            # Check if the folder path is valid before trying to connect
+            if not os.path.isdir(folder_path):
+                error_placeholder.error(f"❌ Cannot reach the path: `{folder_path}`. Please verify the folder exists.")
+                sync_running = False
+                continue
+
             conn = psycopg2.connect(host=host, port=port, user=user, password=password, dbname=db_name)
-            create_pivoted_table_if_not_exists(conn)
+            conn.autocommit = True
             cursor = conn.cursor()
 
             sql_files = glob.glob(os.path.join(folder_path, "*.sql"))
             new_files = [f for f in sql_files if f not in processed_files]
+            
             if not new_files:
-                status_placeholder.info("📁 No new files yet.")
+                status_placeholder.info("📁 No new files yet. Waiting for new .sql files...")
             else:
                 all_data = []
                 for file in new_files:
-                    with open(file, 'r') as f:
-                        raw_sql = f.read()
+                    try:
+                        with open(file, 'r') as f:
+                            raw_sql = f.read()
+                        
                         cursor.execute("DROP TABLE IF EXISTS temp_raw;")
                         cursor.execute("""
                             CREATE TEMP TABLE temp_raw (
@@ -116,39 +137,81 @@ def sync_continuously():
                             );
                         """)
                         cursor.execute(raw_sql)
+                        
                         cursor.execute("SELECT * FROM temp_raw;")
                         rows = cursor.fetchall()
+                        
                         df = pd.DataFrame(rows, columns=["DateAndTime", "TagIndex", "Val"])
                         df["TAG"] = df["TagIndex"].map(tag_mapping)
                         df.dropna(subset=["TAG"], inplace=True)
+                        
                         pivot_df = df.pivot_table(index="DateAndTime", columns="TAG", values="Val", aggfunc='first').reset_index()
                         all_data.append(pivot_df)
+                        
                         processed_files.add(file)
+                        status_placeholder.success(f"✅ Processed file: {os.path.basename(file)}")
+
+                    except FileNotFoundError:
+                        error_placeholder.error(f"❌ File not found: `{os.path.basename(file)}`. This file may have been moved or deleted.")
+                        continue
+                    except Exception as e:
+                        error_placeholder.error(f"❌ Error reading or processing file `{os.path.basename(file)}`. The file might be corrupted or in an incorrect format. Error: {e}")
+                        continue
 
                 if all_data:
                     combined = pd.concat(all_data, ignore_index=True).sort_values("DateAndTime")
+                    
+                    # Constructing the insert query more robustly
                     for _, row in combined.iterrows():
                         cols = ','.join(f'"{col}"' for col in row.index)
-                        vals = ','.join("NULL" if pd.isna(val) else f"{val}" if isinstance(val, (int, float)) else f"'{val}'" for val in row.values)
-                        insert = f'INSERT INTO {table_name} ({cols}) VALUES ({vals});'
+                        
+                        # Handle NULLs correctly
+                        vals = []
+                        for val in row.values:
+                            if pd.isna(val):
+                                vals.append('NULL')
+                            elif isinstance(val, (int, float)):
+                                vals.append(str(val))
+                            else:
+                                vals.append(f"'{val}'")
+                        vals_str = ','.join(vals)
+
+                        insert = f'INSERT INTO {table_name} ({cols}) VALUES ({vals_str});'
                         cursor.execute(insert)
+                    
                     conn.commit()
-                    status_placeholder.success(f"✅ Synced {len(new_files)} new file(s).")
+                    status_placeholder.success(f"✅ Synced {len(new_files)} new file(s) to the table.")
+            
             cursor.close()
             conn.close()
+
+        except psycopg2.OperationalError as e:
+            error_placeholder.error(f"❌ Database connection failed. Please check your **credentials and that the PostgreSQL service is running**. Error: {e}")
+            sync_running = False
         except Exception as e:
-            error_placeholder.error(f"❌ Sync error: {e}")
+            error_placeholder.error(f"❌ General sync error: {e}")
+            sync_running = False
+        
         time.sleep(60)  # Wait 1 minute
 
 # ---------------------------
 # Sync Button Controls
 # ---------------------------
 if submitted:
-    create_database_if_not_exists()
+    create_database_if_not_exists(host, port, user, password, db_name)
+    # Get a connection to create the table
+    try:
+        conn = psycopg2.connect(host=host, port=port, user=user, password=password, dbname=db_name)
+        create_pivoted_table_if_not_exists(conn, table_name, tag_mapping)
+        conn.close()
+    except psycopg2.OperationalError as e:
+        error_placeholder.error(f"❌ Could not connect to the new database `{db_name}` to create the table. Please verify the database exists and your credentials are correct. Error: {e}")
+    except Exception as e:
+        error_placeholder.error(f"❌ An error occurred during table creation. Error: {e}")
 
-if st.button("🚀 Start Sync") and not sync_running:
+if st.button("🚀 Start Sync") and not sync_running and submitted:
     sync_running = True
-    sync_thread = threading.Thread(target=sync_continuously)
+    sync_thread = threading.Thread(target=sync_continuously, args=(host, port, user, password, db_name, table_name, folder_path, tag_mapping))
     sync_thread.start()
     status_placeholder.info("⏳ Sync started...")
 
