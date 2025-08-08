@@ -9,9 +9,12 @@ import time
 # ---------------------------
 # Global State
 # ---------------------------
-sync_thread = None
-sync_running = False
-processed_files = set()
+if 'sync_running' not in st.session_state:
+    st.session_state.sync_running = False
+if 'processed_files' not in st.session_state:
+    st.session_state.processed_files = set()
+if 'sync_thread' not in st.session_state:
+    st.session_state.sync_thread = None
 
 # ---------------------------
 # Tag Mapping (from image)
@@ -50,12 +53,6 @@ with st.sidebar.form("connection_form"):
     submitted = st.form_submit_button("✅ Save Settings")
 
 # ---------------------------
-# Placeholders
-# ---------------------------
-status_placeholder = st.empty()
-error_placeholder = st.empty()
-
-# ---------------------------
 # DB Setup
 # ---------------------------
 def create_database_if_not_exists(host, port, user, password, db_name):
@@ -67,17 +64,18 @@ def create_database_if_not_exists(host, port, user, password, db_name):
         cursor.execute(f"SELECT 1 FROM pg_database WHERE datname = '{db_name}'")
         if not cursor.fetchone():
             cursor.execute(f"CREATE DATABASE {db_name}")
-            status_placeholder.success(f"✅ Database `{db_name}` created successfully.")
+            st.success(f"✅ Database `{db_name}` created successfully.")
         else:
-            status_placeholder.info(f"ℹ️ Database `{db_name}` already exists.")
+            st.info(f"ℹ️ Database `{db_name}` already exists.")
         cursor.close()
         conn.close()
     except psycopg2.OperationalError as e:
-        error_placeholder.error(f"❌ Cannot connect to PostgreSQL to create the database. Please check your **Host, Port, Username, and Password**. Error: {e}")
-        st.stop()
+        st.error(f"❌ Cannot connect to PostgreSQL to create the database. Please check your **Host, Port, Username, and Password**. Error: {e}")
+        return False
     except Exception as e:
-        error_placeholder.error(f"❌ An unexpected error occurred while creating the database. Error: {e}")
-        st.stop()
+        st.error(f"❌ An unexpected error occurred while creating the database. Error: {e}")
+        return False
+    return True
 
 def create_pivoted_table_if_not_exists(conn, table_name, tag_mapping):
     """Creates the target table if it doesn't exist."""
@@ -92,24 +90,25 @@ def create_pivoted_table_if_not_exists(conn, table_name, tag_mapping):
     try:
         cursor.execute(create_query)
         conn.commit()
-        status_placeholder.success(f"✅ Table `{table_name}` verified/created successfully.")
+        st.success(f"✅ Table `{table_name}` verified/created successfully.")
     except Exception as e:
-        error_placeholder.error(f"❌ Error creating the table `{table_name}`. Please check if your **table name is valid** and if the database user has **permissions**. Error: {e}")
+        st.error(f"❌ Error creating the table `{table_name}`. Please check if your **table name is valid** and if the database user has **permissions**. Error: {e}")
+        return False
     finally:
         cursor.close()
+    return True
 
 # ---------------------------
 # Sync Function
 # ---------------------------
 def sync_continuously(host, port, user, password, db_name, table_name, folder_path, tag_mapping):
     """The main continuous sync loop."""
-    global sync_running
-    while sync_running:
+    while st.session_state.sync_running:
         try:
             # Check if the folder path is valid before trying to connect
             if not os.path.isdir(folder_path):
-                error_placeholder.error(f"❌ Cannot reach the path: `{folder_path}`. Please verify the folder exists.")
-                sync_running = False
+                st.error(f"❌ Cannot reach the path: `{folder_path}`. Please verify the folder exists.")
+                st.session_state.sync_running = False
                 continue
 
             conn = psycopg2.connect(host=host, port=port, user=user, password=password, dbname=db_name)
@@ -117,10 +116,10 @@ def sync_continuously(host, port, user, password, db_name, table_name, folder_pa
             cursor = conn.cursor()
 
             sql_files = glob.glob(os.path.join(folder_path, "*.sql"))
-            new_files = [f for f in sql_files if f not in processed_files]
+            new_files = [f for f in sql_files if f not in st.session_state.processed_files]
             
             if not new_files:
-                status_placeholder.info("📁 No new files yet. Waiting for new .sql files...")
+                st.info("📁 No new files yet. Waiting for new .sql files...")
             else:
                 all_data = []
                 for file in new_files:
@@ -148,14 +147,14 @@ def sync_continuously(host, port, user, password, db_name, table_name, folder_pa
                         pivot_df = df.pivot_table(index="DateAndTime", columns="TAG", values="Val", aggfunc='first').reset_index()
                         all_data.append(pivot_df)
                         
-                        processed_files.add(file)
-                        status_placeholder.success(f"✅ Processed file: {os.path.basename(file)}")
+                        st.session_state.processed_files.add(file)
+                        st.success(f"✅ Processed file: {os.path.basename(file)}")
 
                     except FileNotFoundError:
-                        error_placeholder.error(f"❌ File not found: `{os.path.basename(file)}`. This file may have been moved or deleted.")
+                        st.error(f"❌ File not found: `{os.path.basename(file)}`. This file may have been moved or deleted.")
                         continue
                     except Exception as e:
-                        error_placeholder.error(f"❌ Error reading or processing file `{os.path.basename(file)}`. The file might be corrupted or in an incorrect format. Error: {e}")
+                        st.error(f"❌ Error reading or processing file `{os.path.basename(file)}`. The file might be corrupted or in an incorrect format. Error: {e}")
                         continue
 
                 if all_data:
@@ -164,8 +163,6 @@ def sync_continuously(host, port, user, password, db_name, table_name, folder_pa
                     # Constructing the insert query more robustly
                     for _, row in combined.iterrows():
                         cols = ','.join(f'"{col}"' for col in row.index)
-                        
-                        # Handle NULLs correctly
                         vals = []
                         for val in row.values:
                             if pd.isna(val):
@@ -175,46 +172,44 @@ def sync_continuously(host, port, user, password, db_name, table_name, folder_pa
                             else:
                                 vals.append(f"'{val}'")
                         vals_str = ','.join(vals)
-
                         insert = f'INSERT INTO {table_name} ({cols}) VALUES ({vals_str});'
                         cursor.execute(insert)
                     
                     conn.commit()
-                    status_placeholder.success(f"✅ Synced {len(new_files)} new file(s) to the table.")
+                    st.success(f"✅ Synced {len(new_files)} new file(s) to the table.")
             
             cursor.close()
             conn.close()
 
         except psycopg2.OperationalError as e:
-            error_placeholder.error(f"❌ Database connection failed. Please check your **credentials and that the PostgreSQL service is running**. Error: {e}")
-            sync_running = False
+            st.error(f"❌ Database connection failed. Please check your **credentials and that the PostgreSQL service is running**. Error: {e}")
+            st.session_state.sync_running = False
         except Exception as e:
-            error_placeholder.error(f"❌ General sync error: {e}")
-            sync_running = False
+            st.error(f"❌ General sync error: {e}")
+            st.session_state.sync_running = False
         
         time.sleep(60)  # Wait 1 minute
 
 # ---------------------------
-# Sync Button Controls
+# Main App Logic
 # ---------------------------
 if submitted:
-    create_database_if_not_exists(host, port, user, password, db_name)
-    # Get a connection to create the table
-    try:
-        conn = psycopg2.connect(host=host, port=port, user=user, password=password, dbname=db_name)
-        create_pivoted_table_if_not_exists(conn, table_name, tag_mapping)
-        conn.close()
-    except psycopg2.OperationalError as e:
-        error_placeholder.error(f"❌ Could not connect to the new database `{db_name}` to create the table. Please verify the database exists and your credentials are correct. Error: {e}")
-    except Exception as e:
-        error_placeholder.error(f"❌ An error occurred during table creation. Error: {e}")
+    if create_database_if_not_exists(host, port, user, password, db_name):
+        try:
+            conn = psycopg2.connect(host=host, port=port, user=user, password=password, dbname=db_name)
+            create_pivoted_table_if_not_exists(conn, table_name, tag_mapping)
+            conn.close()
+        except psycopg2.OperationalError as e:
+            st.error(f"❌ Could not connect to the new database `{db_name}` to create the table. Please verify the database exists and your credentials are correct. Error: {e}")
+        except Exception as e:
+            st.error(f"❌ An error occurred during table creation. Error: {e}")
 
-if st.button("🚀 Start Sync") and not sync_running and submitted:
-    sync_running = True
-    sync_thread = threading.Thread(target=sync_continuously, args=(host, port, user, password, db_name, table_name, folder_path, tag_mapping))
-    sync_thread.start()
-    status_placeholder.info("⏳ Sync started...")
+if st.button("🚀 Start Sync") and not st.session_state.sync_running and submitted:
+    st.session_state.sync_running = True
+    st.session_state.sync_thread = threading.Thread(target=sync_continuously, args=(host, port, user, password, db_name, table_name, folder_path, tag_mapping))
+    st.session_state.sync_thread.start()
+    st.info("⏳ Sync started...")
 
-if st.button("🛑 Stop Sync") and sync_running:
-    sync_running = False
-    status_placeholder.warning("🛑 Sync stopped.")
+if st.button("🛑 Stop Sync") and st.session_state.sync_running:
+    st.session_state.sync_running = False
+    st.warning("🛑 Sync stopped.")
