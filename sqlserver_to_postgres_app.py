@@ -5,6 +5,7 @@ import glob
 import pandas as pd
 import threading
 import time
+import sys
 
 # ---------------------------
 # Global State
@@ -53,7 +54,13 @@ with st.sidebar.form("connection_form"):
     table_name = st.text_input("Target Table Name", value="scada_data")
 
     st.subheader("SQL File Folder")
-    folder_path = st.text_input("Enter the folder path where .sql files are stored", placeholder="e.g., G:/Monika/WFO Fractionation System/sql_files")
+    # Check if a path was passed as a command-line argument
+    if len(sys.argv) > 1:
+        initial_path = sys.argv[1]
+        st.info(f"Path detected from command line: `{initial_path}`")
+        folder_path = initial_path
+    else:
+        folder_path = st.text_input("Enter the folder path where .sql files are stored", placeholder="e.g., G:/Monika/WFO Fractionation System/sql_files")
 
     submitted = st.form_submit_button("✅ Save Settings")
 

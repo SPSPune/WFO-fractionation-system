@@ -13,8 +13,8 @@ echo Installing dependencies...
 %PYTHON_EXEC% -m pip install --upgrade pip
 %PYTHON_EXEC% -m pip install -r requirements.txt
 
-:: Start Streamlit app
+:: Start Streamlit app and pass the folder path as an argument
 echo Launching app...
-%PYTHON_EXEC% -m streamlit run sqlserver_to_postgres_app.py
+%PYTHON_EXEC% -m streamlit run sqlserver_to_postgres_app.py "C:\Program Files (x86)\Microsoft SQL Server\MSSQL12.SQLEXPRESS\MSSQL\Backup"
 
 pause
