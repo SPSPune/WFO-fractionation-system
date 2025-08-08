@@ -19,13 +19,18 @@ if 'sync_thread' not in st.session_state:
 # ---------------------------
 # Tag Mapping (from image)
 # ---------------------------
+# Expanded tag mapping to include values from the user's screenshot
 tag_mapping = {
     251: "TI-31", 253: "TI-32", 254: "TI-33", 255: "TI-34", 256: "TI-35",
     257: "TI-36", 258: "TI-37", 259: "TI-38", 260: "TI-39", 261: "TI-40",
     270: "TI-41", 271: "TI-42", 273: "TI-43", 274: "TI-44", 275: "TI-45",
     272: "TI-42A", 279: "TI-54", 199: "TI-107", 201: "TI-109", 296: "TI-73A",
     297: "TI-73B", 280: "TI-55", 154: "PTT-03", 149: "PTB-03", 122: "LT-O5",
-    123: "LT-06", 28: "FT-01", 46: "FT-07", 63: "FT-10", 37: "FT-04"
+    123: "LT-06", 28: "FT-01", 46: "FT-07", 63: "FT-10", 37: "FT-04",
+    # Added new tags from the user's screenshot
+    225: "Tag-225", 226: "Tag-226", 227: "Tag-227", 228: "Tag-228",
+    229: "Tag-229", 230: "Tag-230", 231: "Tag-231", 232: "Tag-232",
+    233: "Tag-233", 234: "Tag-234", 235: "Tag-235"
 }
 
 # ---------------------------
@@ -142,6 +147,12 @@ def sync_continuously(host, port, user, password, db_name, table_name, folder_pa
                         
                         df = pd.DataFrame(rows, columns=["DateAndTime", "TagIndex", "Val"])
                         df["TAG"] = df["TagIndex"].map(tag_mapping)
+                        
+                        # New: Check for unmapped tags and warn the user
+                        mismatched_tags = df[df['TAG'].isnull()]['TagIndex'].unique()
+                        if len(mismatched_tags) > 0:
+                            st.warning(f"⚠️ Warning: Found tags in file '{os.path.basename(file)}' that are not in the mapping dictionary: {list(mismatched_tags)}. These rows will be skipped.")
+                        
                         df.dropna(subset=["TAG"], inplace=True)
                         
                         pivot_df = df.pivot_table(index="DateAndTime", columns="TAG", values="Val", aggfunc='first').reset_index()
@@ -160,6 +171,9 @@ def sync_continuously(host, port, user, password, db_name, table_name, folder_pa
                 if all_data:
                     combined = pd.concat(all_data, ignore_index=True).sort_values("DateAndTime")
                     
+                    if combined.empty:
+                        st.warning("⚠️ No valid data found in the new files to insert.")
+                        
                     # Constructing the insert query more robustly
                     for _, row in combined.iterrows():
                         cols = ','.join(f'"{col}"' for col in row.index)
