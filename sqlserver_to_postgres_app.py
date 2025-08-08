@@ -148,11 +148,6 @@ def sync_continuously(host, port, user, password, db_name, table_name, folder_pa
                         df = pd.DataFrame(rows, columns=["DateAndTime", "TagIndex", "Val"])
                         df["TAG"] = df["TagIndex"].map(tag_mapping)
                         
-                        # New: Check for unmapped tags and warn the user
-                        mismatched_tags = df[df['TAG'].isnull()]['TagIndex'].unique()
-                        if len(mismatched_tags) > 0:
-                            st.warning(f"⚠️ Warning: Found tags in file '{os.path.basename(file)}' that are not in the mapping dictionary: {list(mismatched_tags)}. These rows will be skipped.")
-                        
                         df.dropna(subset=["TAG"], inplace=True)
                         
                         pivot_df = df.pivot_table(index="DateAndTime", columns="TAG", values="Val", aggfunc='first').reset_index()
