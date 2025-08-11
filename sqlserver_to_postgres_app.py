@@ -6,7 +6,7 @@ import time
 import sys
 import pyodbc
 import re
-from pyodbc import OperationalError as PyodbcOperationalError
+from pyodbc import OperationalError as PyodbcOperationalError, ProgrammingError as PyodbcProgrammingError
 
 # ==============================================================================
 #      _           _        _
@@ -75,7 +75,8 @@ st.sidebar.header("🔧 Sync Settings")
 with st.sidebar.form("connection_form"):
     st.subheader("SQL Server Details")
     sql_server = st.text_input("SQL Server Name", value=CONFIG["SQL_SERVER_NAME"], help="The server where your SCADA data is located.")
-    sql_db_name = st.text_input("SQL Server Database Name", value=CONFIG["SQL_DB_NAME"], help="The name of the database that contains your SCADA data.")
+    # This is the new database name the user wants to use
+    sql_db_name = st.text_input("SQL Server Database Name", value=CONFIG["SQL_DB_NAME"], help="The name of the database to use or create.")
     sql_table_name_raw = st.text_input("Source Raw Table Name", value=CONFIG["SQL_TABLE_NAME_RAW"], help="The name of the raw data table.")
     sql_table_name_pivoted = st.text_input("Target Pivoted Table Name", value=CONFIG["SQL_TABLE_NAME_PIVOTED"], help="The name of the table to store the pivoted data.")
 
@@ -84,6 +85,41 @@ with st.sidebar.form("connection_form"):
 # ---------------------------
 # DB Utility Functions
 # ---------------------------
+
+def create_sqlserver_database_if_not_exists(sql_server, db_name):
+    """
+    Connects to the master database and creates a new database if it does not exist.
+    """
+    conn = None
+    try:
+        conn_str = f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={sql_server};DATABASE=master;Trusted_Connection=yes;'
+        conn = pyodbc.connect(conn_str, autocommit=True)
+        cursor = conn.cursor()
+        
+        # Check if the database exists
+        check_query = f"SELECT name FROM sys.databases WHERE name = N'{db_name}'"
+        cursor.execute(check_query)
+        if cursor.fetchone():
+            st.info(f"ℹ️ SQL Server database `{db_name}` already exists. Skipping creation.")
+            return True
+        
+        # Create the new database
+        create_query = f"CREATE DATABASE [{db_name}]"
+        st.info(f"ℹ️ Attempting to create SQL Server database `{db_name}`...")
+        cursor.execute(create_query)
+        st.success(f"✅ SQL Server database `{db_name}` created successfully.")
+        return True
+    except PyodbcOperationalError as e:
+        st.error(f"❌ Could not connect to SQL Server to create the database. Check your connection details and permissions. Error: {e}")
+        return False
+    except Exception as e:
+        st.error(f"❌ An error occurred during database creation. Error: {e}")
+        return False
+    finally:
+        if conn:
+            cursor.close()
+            conn.close()
+
 
 def create_sql_pivoted_table_if_not_exists(sql_server, sql_db_name, table_name):
     """
@@ -97,7 +133,7 @@ def create_sql_pivoted_table_if_not_exists(sql_server, sql_db_name, table_name):
         cursor = conn.cursor()
         
         # Dynamically build the columns based on the TAG_MAPPING
-        columns = ", ".join([f'"{tag_name}" FLOAT' for tag_name in TAG_MAPPING.values()])
+        columns = ", ".join([f'[{tag_name}] FLOAT' for tag_name in TAG_MAPPING.values()])
         create_query = f"""
         IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='{table_name.split('.')[-1]}' and xtype='U')
         CREATE TABLE {table_name} (
@@ -129,12 +165,11 @@ def get_latest_sql_timestamp(sql_server, sql_db_name, sql_table_name):
         conn = pyodbc.connect(conn_str)
         query = f"SELECT MAX(DateAndTime) FROM {sql_table_name};"
         df = pd.read_sql(query, conn)
-        conn.close()
         # Handle case where table is empty
         if df.iloc[0, 0] is None:
             return pd.Timestamp('1970-01-01')
         return df.iloc[0, 0]
-    except PyodbcOperationalError as e:
+    except (PyodbcOperationalError, PyodbcProgrammingError) as e:
         st.error(f"❌ Could not fetch latest timestamp from SQL Server. Check your server name and database permissions. Error: {e}")
         return None
     except Exception as e:
@@ -177,7 +212,6 @@ def sync_continuously(config):
             """
             
             raw_df = pd.read_sql(sql_query, sql_conn_read, params=[latest_timestamp])
-            sql_conn_read.close()
             
             _log_message(f"📁 Fetched {len(raw_df)} new raw rows from SQL Server.")
 
@@ -267,11 +301,15 @@ except ImportError:
 
 # --- DB Setup ---
 if submitted:
-    create_sql_pivoted_table_if_not_exists(sql_server, sql_db_name, sql_table_name_pivoted)
-    CONFIG['SQL_SERVER_NAME'] = sql_server
-    CONFIG['SQL_DB_NAME'] = sql_db_name
-    CONFIG['SQL_TABLE_NAME_RAW'] = sql_table_name_raw
-    CONFIG['SQL_TABLE_NAME_PIVOTED'] = sql_table_name_pivoted
+    # First, try to create the new database
+    if create_sqlserver_database_if_not_exists(sql_server, sql_db_name):
+        # If the database is successfully created or already exists, proceed to create the table
+        create_sql_pivoted_table_if_not_exists(sql_server, sql_db_name, sql_table_name_pivoted)
+        # Update the config with the new user-defined values
+        CONFIG['SQL_SERVER_NAME'] = sql_server
+        CONFIG['SQL_DB_NAME'] = sql_db_name
+        CONFIG['SQL_TABLE_NAME_RAW'] = sql_table_name_raw
+        CONFIG['SQL_TABLE_NAME_PIVOTED'] = sql_table_name_pivoted
     st.rerun()
 
 # --- Live Data Diagnostic ---
