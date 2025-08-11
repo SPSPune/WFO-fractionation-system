@@ -15,7 +15,7 @@ from pyodbc import OperationalError as PyodbcOperationalError
 # | |__  ___| |_ _   _ __ _| |_ ___| |__
 # | '_ \ / _ \ __| | | |/ _` | __/ __| '_ \
 # | |_) | |  __/ |_| |_| | (_| | | |__ \ | | |
-# |_.__/  \___|\__|\__,_|\__,_|\__|___/_| |_|
+# |_.__/  \___|\__|\__,_|\__|___/_| |_|
 #
 # Edit these values to configure your application
 # ==============================================================================
@@ -318,7 +318,7 @@ if submitted:
     CONFIG['PG_USER'] = user
     CONFIG['PG_DB_NAME'] = db_name
     CONFIG['PG_TABLE_NAME'] = pg_table_name
-    st.experimental_rerun() # Rerun to update the main UI with new config
+    st.rerun() # Rerun to update the main UI with new config
 
 # --- Data Preview ---
 st.header("🔍 SQL Server Data Preview")
