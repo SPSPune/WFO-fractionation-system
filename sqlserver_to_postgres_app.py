@@ -1,169 +1,197 @@
-# Import necessary libraries
-import streamlit as st
-import pandas as pd
-import threading
-import time
 import json
-import pyodbc
-import psycopg2
-from psycopg2 import sql
+import time
+import os
+from typing import List, Dict, Any
+from psycopg import connect, sql, OperationalError
+import sqlite3
 
-# --- 1. CONFIGURATION ---
-# Load configuration from a separate file for easier management.
-try:
-    with open('config.json', 'r') as f:
-        CONFIG = json.load(f)
-except FileNotFoundError:
-    st.error("❌ Error: 'config.json' not found. Please create this file with your database configurations.")
-    st.stop()
-except json.JSONDecodeError:
-    st.error("❌ Error: 'config.json' is not a valid JSON file. Please check its syntax.")
-    st.stop()
+# --- Configuration and Best Practices ---
+# Use environment variables for sensitive credentials
+POSTGRES_HOST = os.environ.get("PG_HOST", "localhost")
+POSTGRES_DB = os.environ.get("PG_DB", "your_database_name")
+POSTGRES_USER = os.environ.get("PG_USER", "your_username")
+POSTGRES_PASSWORD = os.environ.get("PG_PASSWORD", "your_password")
 
-# --- 2. GLOBAL STATE AND UI SETUP ---
-# Use session state to manage the sync running status and logging messages
-if 'sync_running' not in st.session_state:
-    st.session_state.sync_running = False
+# The name of the table in your source and destination databases
+SOURCE_TABLE = "source_data"
+DESTINATION_TABLE = "destination_data"
 
-if 'log_messages' not in st.session_state:
-    st.session_state.log_messages = []
+# The column that holds the tag index for mapping
+TAG_INDEX_COLUMN = "tag_index"
 
-# Function to add messages to the log and update the UI
-def _log_message(message):
-    st.session_state.log_messages.append(f"{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())} - {message}")
-    # Keep the log to a reasonable length
-    if len(st.session_state.log_messages) > 100:
-        st.session_state.log_messages.pop(0)
+# The interval in seconds to wait between sync cycles
+SYNC_INTERVAL = 60  # Sync every 1 minute
 
-# Main UI title and status display
-st.title("Data Synchronization Manager")
-st.subheader("SQL Server to PostgreSQL")
-
-# Display a status badge
-if st.session_state.sync_running:
-    st.success("🟢 Sync Status: Running")
-else:
-    st.warning("🔴 Sync Status: Stopped")
-
-# Control buttons
-col1, col2 = st.columns(2)
-with col1:
-    if st.button("Start Sync", use_container_width=True, type="primary", disabled=st.session_state.sync_running):
-        st.session_state.sync_running = True
-        st.session_state.log_messages = [] # Clear logs on start
-        _log_message("✅ Sync process started.")
-        # Start the sync in a separate thread to prevent blocking the UI
-        threading.Thread(target=sync_continuously, daemon=True).start()
-        st.experimental_rerun()
-with col2:
-    if st.button("Stop Sync", use_container_width=True, type="secondary", disabled=not st.session_state.sync_running):
-        st.session_state.sync_running = False
-        _log_message("🛑 Sync process stopped by user.")
-        st.experimental_rerun()
-
-# Log display area
-st.markdown("---")
-st.markdown("### Live Log")
-log_area = st.empty()
-with log_area:
-    st.text_area("Log Output", "\n".join(st.session_state.log_messages), height=300, key="log_output")
-
-# --- 3. SYNCHRONIZATION LOGIC ---
-def sync_continuously():
+def load_config() -> Dict[str, Any]:
     """
-    This function runs in a background thread to continuously sync data.
+    Loads the tag mapping from the config.json file.
+    
+    Returns:
+        Dict[str, Any]: The loaded configuration data.
     """
-    while st.session_state.sync_running:
-        _log_message("ℹ️ Starting a new sync cycle...")
+    try:
+        with open('config.json', 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        print("Error: config.json file not found. Exiting.")
+        exit()
+    except json.JSONDecodeError:
+        print("Error: Invalid JSON in config.json. Please check for syntax errors.")
+        exit()
 
+def connect_to_postgres():
+    """
+    Establishes a connection to the PostgreSQL database.
+    
+    Returns:
+        psycopg.Connection: A database connection object, or None if the connection fails.
+    """
+    try:
+        conn = connect(
+            host=POSTGRES_HOST,
+            dbname=POSTGRES_DB,
+            user=POSTGRES_USER,
+            password=POSTGRES_PASSWORD
+        )
+        print("Successfully connected to PostgreSQL.")
+        return conn
+    except OperationalError as e:
+        print(f"Error connecting to PostgreSQL: {e}")
+        return None
+
+def connect_to_source_db():
+    """
+    Establishes a connection to the source SQL database.
+    This example uses an in-memory SQLite database for simplicity.
+    In a real-world scenario, you would replace this with your actual database connector.
+
+    Returns:
+        sqlite3.Connection: A database connection object, or None if the connection fails.
+    """
+    try:
+        conn = sqlite3.connect(":memory:") # Example for an in-memory db
+        # Create a dummy table and some data for demonstration
+        cursor = conn.cursor()
+        cursor.execute(f"CREATE TABLE IF NOT EXISTS {SOURCE_TABLE} (id INTEGER PRIMARY KEY, {TAG_INDEX_COLUMN} TEXT, value TEXT)")
+        cursor.execute(f"INSERT INTO {SOURCE_TABLE} (id, {TAG_INDEX_COLUMN}, value) VALUES (1, '1', 'Initial data point')")
+        conn.commit()
+        print("Successfully connected to source SQLite DB.")
+        return conn
+    except sqlite3.OperationalError as e:
+        print(f"Error connecting to source database: {e}")
+        return None
+
+def get_source_data(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """
+    Fetches all data from the source database.
+    
+    Args:
+        conn (sqlite3.Connection): The connection object for the source database.
+    
+    Returns:
+        List[Dict[str, Any]]: A list of dictionaries, where each dictionary
+                               represents a row of data from the source.
+    """
+    cursor = conn.cursor()
+    cursor.execute(f"SELECT * FROM {SOURCE_TABLE}")
+    
+    # Get column names to create a dictionary for each row
+    columns = [desc[0] for desc in cursor.description]
+    data = [dict(zip(columns, row)) for row in cursor.fetchall()]
+    
+    return data
+
+def upsert_data_to_postgres(conn: connect, data: List[Dict[str, Any]], tag_mapping: Dict[str, str]):
+    """
+    Performs an upsert operation (UPDATE or INSERT) on the PostgreSQL table.
+    
+    Args:
+        conn (connect): The connection object for the PostgreSQL database.
+        data (List[Dict[str, Any]]): The data to be upserted.
+        tag_mapping (Dict[str, str]): The mapping from tag index to tag name.
+    """
+    try:
+        with conn.cursor() as cursor:
+            for row in data:
+                tag_index = row.get(TAG_INDEX_COLUMN)
+                
+                # Map the tag index to the full tag name from config.json
+                tag_name = tag_mapping.get(tag_index, 'unknown')
+                
+                # Assume a simple schema for the destination table
+                # (id, original_tag_index, mapped_tag_name, value)
+                id_value = row.get('id')
+                other_value = row.get('value')
+                
+                if id_value is None:
+                    print("Skipping row with missing 'id'.")
+                    continue
+                
+                # Construct the SQL query for an upsert operation
+                upsert_query = sql.SQL("""
+                    INSERT INTO {table} (id, original_tag_index, mapped_tag_name, value)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (id) DO UPDATE
+                    SET original_tag_index = EXCLUDED.original_tag_index,
+                        mapped_tag_name = EXCLUDED.mapped_tag_name,
+                        value = EXCLUDED.value;
+                """).format(table=sql.Identifier(DESTINATION_TABLE))
+                
+                # Execute the query with the mapped data
+                cursor.execute(upsert_query, (id_value, tag_index, tag_name, other_value))
+                print(f"Upserted row with id: {id_value}, mapped tag: {tag_name}")
+            
+            # Commit the transaction after all upserts are complete
+            conn.commit()
+            print("Successfully committed changes.")
+    except Exception as e:
+        print(f"An error occurred during upsert operation: {e}")
+        conn.rollback() # Roll back any changes if an error occurred
+
+def main():
+    """
+    Main function to run the continuous data synchronization process.
+    """
+    print("Starting continuous data synchronization process...")
+    
+    # Load configuration once
+    config = load_config()
+    tag_mapping = config.get("tag_mapping", {})
+    
+    while True:
+        source_conn = None
+        postgres_conn = None
         try:
-            # Step 1: Connect to SQL Server
-            sql_conn = pyodbc.connect(
-                f'DRIVER={{ODBC Driver 17 for SQL Server}};'
-                f'SERVER={CONFIG["SQL_SERVER_NAME"]};'
-                f'DATABASE={CONFIG["SQL_DB_NAME"]};'
-                f'Trusted_Connection=yes;'
-            )
-            _log_message("✅ Connected to SQL Server.")
-
-            # Step 2: Query data from SQL Server
-            sql_query = f"SELECT [TAG], [Val], [DateAndTime] FROM {CONFIG['SQL_TABLE_NAME']}"
-            df = pd.read_sql(sql_query, sql_conn)
-            sql_conn.close()
-            _log_message(f"✅ Fetched {len(df)} rows from SQL Server.")
-
-            # Step 3: Prepare data for PostgreSQL
-            # Pivot the data to a wide format to match the PostgreSQL table schema
-            pivot_df = df.pivot_table(index="DateAndTime", columns="TAG", values="Val", aggfunc='first').reset_index()
+            # Connect to both databases
+            source_conn = connect_to_source_db()
+            postgres_conn = connect_to_postgres()
             
-            # Remove any columns that are all NaN (optional, but good practice)
-            pivot_df.dropna(axis=1, how='all', inplace=True)
-            pivot_df.dropna(inplace=True)
-
-            # --- CRITICAL DEBUGGING SECTION ---
-            # This section helps you verify the DataFrame before insertion.
-            _log_message(f"ℹ️ Prepared {len(pivot_df)} rows for insertion. Previewing the data...")
-            _log_message(f"DataFrame columns: {list(pivot_df.columns)}")
-            _log_message(f"DataFrame dtypes:\n{pivot_df.dtypes.to_string()}")
-            _log_message(f"First 5 rows of data:\n{pivot_df.head().to_string()}")
-            # --- END OF CRITICAL DEBUGGING SECTION ---
-
-            # Step 4: Connect to PostgreSQL
-            pg_conn = psycopg2.connect(
-                host=CONFIG["PG_HOST"],
-                port=CONFIG["PG_PORT"],
-                user=CONFIG["PG_USER"],
-                dbname=CONFIG["PG_DB_NAME"]
-            )
-            pg_cursor = pg_conn.cursor()
-            _log_message("✅ Connected to PostgreSQL.")
-
-            # Step 5: Insert data into PostgreSQL
-            if not pivot_df.empty:
-                # Define the target table and columns
-                table_name = CONFIG['PG_TABLE_NAME']
-                columns = [sql.Identifier(col) for col in pivot_df.columns]
-                # Prepare the SQL insert statement
-                insert_query = sql.SQL("INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ([your_conflict_column_here]) DO NOTHING").format(
-                    sql.Identifier(table_name),
-                    sql.SQL(', ').join(columns),
-                    sql.SQL(', ').join(sql.Placeholder() * len(columns))
-                )
+            if source_conn and postgres_conn:
+                print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Sync cycle starting...")
                 
-                # Convert the DataFrame to a list of tuples for insertion
-                data_to_insert = [tuple(row) for row in pivot_df.to_numpy()]
+                # Get data from the source database
+                source_data = get_source_data(source_conn)
                 
-                pg_cursor.executemany(insert_query, data_to_insert)
-                pg_conn.commit()
-                _log_message(f"✅ Successfully inserted {len(data_to_insert)} new rows into PostgreSQL.")
+                if not source_data:
+                    print("No new data found in source database.")
+                else:
+                    print(f"Found {len(source_data)} rows to process.")
+                    
+                    # Upsert the data into PostgreSQL
+                    upsert_data_to_postgres(postgres_conn, source_data, tag_mapping)
 
-            pg_cursor.close()
-            pg_conn.close()
-            
-        except pyodbc.Error as e:
-            _log_message(f"❌ SQL Server connection/query failed. Error: {e}")
-            st.session_state.sync_running = False
-        except psycopg2.OperationalError as e:
-            _log_message(f"❌ PostgreSQL connection failed. Error: {e}")
-            st.session_state.sync_running = False
-        except psycopg2.Error as e: # <-- Catch specific insertion errors here
-            _log_message(f"❌ PostgreSQL insertion error: {e}")
-            st.error(f"❌ A data insertion error occurred. Please check the log for details. Error: {e}")
-            st.session_state.sync_running = False
         except Exception as e:
-            _log_message(f"❌ A general error occurred: {e}. Stopping sync.")
-            st.session_state.sync_running = False
+            print(f"An unexpected error occurred: {e}")
+        finally:
+            # Ensure database connections are always closed
+            if source_conn:
+                source_conn.close()
+            if postgres_conn:
+                postgres_conn.close()
+            
+            # Wait for the next sync cycle
+            print(f"Sync cycle complete. Waiting for {SYNC_INTERVAL} seconds...")
+            time.sleep(SYNC_INTERVAL)
 
-        # Pause for a specified interval before the next sync
-        if st.session_state.sync_running:
-            _log_message("ℹ️ Sync cycle complete. Waiting for 60 seconds...")
-            time.sleep(60)
-
-    # Final log message after the loop ends
-    _log_message("🛑 Sync thread has stopped.")
-    st.experimental_rerun()
-
-# --- 4. STARTING THE APP ---
 if __name__ == "__main__":
-    if st.session_state.sync_running:
-        _log_message("✅ Sync process is already running.")
+    main()
