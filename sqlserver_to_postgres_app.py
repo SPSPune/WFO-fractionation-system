@@ -21,7 +21,7 @@ from psycopg2.errors import DuplicateDatabase
 CONFIG = {
     "SQL_SERVER_NAME": r"DESKTOP-DG1Q26L\SQLEXPRESS",
     "SQL_DB_NAME": "JSCPL",
-    "SQL_TABLE_NAME": "dbo.FloaTable",
+    "SQL_TABLE_NAME": "dbo.FloatTable",
     "PG_HOST": "localhost",
     "PG_PORT": "5432",
     "PG_USER": "postgres",
