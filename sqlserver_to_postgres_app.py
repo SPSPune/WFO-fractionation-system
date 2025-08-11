@@ -10,7 +10,7 @@ import re
 from psycopg2.errors import DuplicateDatabase
 
 # ==============================================================================
-#  _          _               _       _
+#      _            _             _      _
 # | |__   ___| |_ _   _  __ _| |_ ___| |__
 # | '_ \ / _ \ __| | | |/ _` | __/ __| '_ \
 # | |_) |  __/ |_| |_| | (_| | | |__ \ | | |
@@ -31,9 +31,6 @@ CONFIG = {
 
 # The dictionary of TagIndex numbers to their friendly names.
 # The sync process will IGNORE any tags from the SQL data that are not in this list.
-# 
-# *** THIS SECTION HAS BEEN UPDATED. PLEASE ADD YOUR OTHER TAGS HERE. ***
-
 TAG_MAPPING = {
     # Existing tags
     251: "TI-31", 253: "TI-32", 254: "TI-33", 255: "TI-35", 256: "TI-35-A",
@@ -43,36 +40,36 @@ TAG_MAPPING = {
     297: "TI-73B", 280: "TI-55", 154: "PTT-03", 149: "PTB-03", 122: "LT-O5",
     123: "LT-06", 28: "FT-01", 46: "FT-07", 63: "FT-10", 37: "FT-04",
     
-    # # New tags based on your screenshot
-    # 317: "TI-317",
-    # 316: "TI-316",
-    # 315: "TI-315",
-    # 314: "TI-314",
-    # 313: "TI-313",
-    # 312: "TI-312",
-    # 311: "TI-311",
-    # 310: "TI-310",
-    # 309: "TI-309",
-    # 308: "TI-308",
+    # New tags based on your screenshot
+    317: "TI-317",
+    316: "TI-316",
+    315: "TI-315",
+    314: "TI-314",
+    313: "TI-313",
+    312: "TI-312",
+    311: "TI-311",
+    310: "TI-310",
+    309: "TI-309",
+    308: "TI-308",
     
-    # # Additional tags from your new screenshots
-    # 318: "TI-318",
-    # 319: "TI-319",
-    # 320: "TI-320",
-    # 321: "TI-321",
-    # 322: "TI-322",
-     323: "TI-323"
+    # Additional tags from your new screenshots
+    318: "TI-318",
+    319: "TI-319",
+    320: "TI-320",
+    321: "TI-321",
+    322: "TI-322",
+    323: "TI-323"
 }
 
 
 # ==============================================================================
-#  _   _             _
+#  _   _          _
 # | | | | __ _ _ __ | | __
 # | |_| |/ _` | '_ \| |/ /
-# |  _  | (_| | | | |   <
+# |  _  | (_| | | | |  <
 # |_| |_|\__,_|\__|_|_|\_\
 #
-#  Streamlit App Layout and Logic
+#   Streamlit App Layout and Logic
 # ==============================================================================
 
 # Global State for Streamlit session
@@ -384,4 +381,4 @@ with sync_log_container:
 # Rerun the app to update the log
 if st.session_state.sync_running:
     time.sleep(1)
-    st.experimental_rerun()
+    st.rerun()
