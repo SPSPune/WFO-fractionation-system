@@ -13,7 +13,7 @@ from psycopg2.errors import DuplicateDatabase
 #  _          _               _       _
 # | |__   ___| |_ _   _  __ _| |_ ___| |__
 # | '_ \ / _ \ __| | | |/ _` | __/ __| '_ \
-# | |_) |  __/ |_| |_| | (_| | |_\__ \ | | |
+# | |_) |  __/ |_| |_| | (_| | | |__ \ | | |
 # |_.__/ \___|\__|\__,_|\__,_|\__|___/_| |_|
 #
 # Edit these values to configure your application
@@ -31,16 +31,28 @@ CONFIG = {
 
 # The dictionary of TagIndex numbers to their friendly names.
 # The sync process will IGNORE any tags from the SQL data that are not in this list.
+# 
+# *** THIS SECTION HAS BEEN UPDATED. PLEASE ADD YOUR OTHER TAGS HERE. ***
 TAG_MAPPING = {
+    # Existing tags
     251: "TI-31", 253: "TI-32", 254: "TI-33", 255: "TI-35", 256: "TI-35-A",
     257: "TI-36", 258: "TI-37", 259: "TI-38", 260: "TI-39", 261: "TI-40",
     270: "TI-41", 271: "TI-42", 273: "TI-43", 274: "TI-44", 275: "TI-45",
     272: "TI-42A", 279: "TI-54", 199: "TI-107", 201: "TI-109", 296: "TI-73A",
     297: "TI-73B", 280: "TI-55", 154: "PTT-03", 149: "PTB-03", 122: "LT-O5",
     123: "LT-06", 28: "FT-01", 46: "FT-07", 63: "FT-10", 37: "FT-04",
-    225: "Tag-225", 226: "Tag-226", 227: "Tag-227", 228: "Tag-228",
-    229: "Tag-229", 230: "Tag-230", 231: "Tag-231", 232: "Tag-232",
-    233: "Tag-233", 234: "Tag-234", 235: "Tag-235"
+    
+    # New tags based on your screenshot
+    317: "TI-317",
+    316: "TI-316",
+    315: "TI-315",
+    314: "TI-314",
+    313: "TI-313",
+    312: "TI-312",
+    311: "TI-311",
+    310: "TI-310",
+    309: "TI-309",
+    308: "TI-308"
 }
 
 # ==============================================================================
@@ -97,6 +109,10 @@ def create_database_if_not_exists(host, port, user, password, db_name):
         st.error(f"❌ Invalid PostgreSQL database name: `{db_name}`. Please use a simple name with only letters, numbers, and underscores (e.g., `scada_db`).")
         return False
     
+    if db_name.lower() == 'postgres':
+        st.error(f"❌ The database name `{db_name}` is a reserved name. Please choose a different name for your database.")
+        return False
+
     conn = None
     try:
         conn = psycopg2.connect(host=host, port=port, user=user, password=password, dbname="postgres")
@@ -150,6 +166,19 @@ def create_pivoted_table_if_not_exists(host, port, user, password, db_name, tabl
             cursor.close()
             conn.close()
 
+def get_latest_sql_timestamp(sql_server, sql_db_name, sql_table_name):
+    """Fetches the most recent timestamp from the SQL Server database."""
+    conn = None
+    try:
+        conn_str = f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={sql_server};DATABASE={sql_db_name};Trusted_Connection=yes;'
+        conn = pyodbc.connect(conn_str)
+        query = f"SELECT MAX(DateAndTime) FROM {sql_table_name};"
+        df = pd.read_sql(query, conn)
+        conn.close()
+        return df.iloc[0, 0]
+    except Exception as e:
+        st.error(f"❌ Could not fetch latest timestamp from SQL Server. Error: {e}")
+        return None
 
 # ---------------------------
 # Sync Function (Diagnostic Mode)
@@ -171,8 +200,13 @@ def sync_continuously(config, tag_mapping, password):
             pg_conn = psycopg2.connect(host=config['PG_HOST'], port=config['PG_PORT'], user=config['PG_USER'], password=password, dbname=config['PG_DB_NAME'])
             pg_cursor = pg_conn.cursor()
             pg_cursor.execute(f"SELECT MAX(DateAndTime) FROM {config['PG_TABLE_NAME']};")
-            latest_timestamp = pg_cursor.fetchone()[0] or '1970-01-01'
-            st.info(f"ℹ️ Latest timestamp in PostgreSQL is: `{latest_timestamp}`.")
+            latest_timestamp = pg_cursor.fetchone()[0]
+            
+            if latest_timestamp:
+                st.info(f"ℹ️ Latest timestamp in PostgreSQL is: `{latest_timestamp}`.")
+            else:
+                latest_timestamp = '1970-01-01'
+                st.info(f"ℹ️ PostgreSQL table is empty. Starting sync from: `{latest_timestamp}`.")
 
             # Step 3: Query SQL Server for new data
             sql_query = f"""
@@ -181,7 +215,7 @@ def sync_continuously(config, tag_mapping, password):
             WHERE DateAndTime > ?
             ORDER BY DateAndTime ASC;
             """
-            st.info(f"ℹ️ Fetching new data from SQL Server (rows newer than `{latest_timestamp}`).")
+            st.info(f"ℹ️ Fetching new data from SQL Server with the query: `WHERE DateAndTime > {latest_timestamp}`.")
             sql_cursor.execute(sql_query, latest_timestamp)
             rows = sql_cursor.fetchall()
             st.info(f"📁 Fetched {len(rows)} rows from SQL Server. Now filtering for relevant tags.")
@@ -281,6 +315,15 @@ except pyodbc.Error as e:
     st.warning(f"⚠️ Could not connect to SQL Server for preview. Check your connection details in the code and your network. Error: {e}")
 except Exception as e:
     st.warning(f"⚠️ An unexpected error occurred while fetching data for preview. Error: {e}")
+
+# --- Live Data Diagnostic ---
+st.header("🩺 Live Data Diagnostic")
+st.info("ℹ️ This section shows the most recent timestamp in your SQL Server database to confirm it's updating.")
+latest_sql_ts = get_latest_sql_timestamp(CONFIG['SQL_SERVER_NAME'], CONFIG['SQL_DB_NAME'], CONFIG['SQL_TABLE_NAME'])
+if latest_sql_ts:
+    st.info(f"✅ The latest timestamp found in the SQL Server table is: `{latest_sql_ts}`.")
+else:
+    st.warning("⚠️ Could not retrieve the latest timestamp from the SQL Server. The table might be empty or a connection error is occurring.")
 
 # --- Sync Controls ---
 if st.button("🚀 Start Sync") and not st.session_state.sync_running:
