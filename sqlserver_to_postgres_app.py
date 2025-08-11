@@ -33,6 +33,7 @@ CONFIG = {
 # The sync process will IGNORE any tags from the SQL data that are not in this list.
 # 
 # *** THIS SECTION HAS BEEN UPDATED. PLEASE ADD YOUR OTHER TAGS HERE. ***
+
 TAG_MAPPING = {
     # Existing tags
     251: "TI-31", 253: "TI-32", 254: "TI-33", 255: "TI-35", 256: "TI-35-A",
@@ -42,25 +43,34 @@ TAG_MAPPING = {
     297: "TI-73B", 280: "TI-55", 154: "PTT-03", 149: "PTB-03", 122: "LT-O5",
     123: "LT-06", 28: "FT-01", 46: "FT-07", 63: "FT-10", 37: "FT-04",
     
-    # New tags based on your screenshot
-    317: "TI-317",
-    316: "TI-316",
-    315: "TI-315",
-    314: "TI-314",
-    313: "TI-313",
-    312: "TI-312",
-    311: "TI-311",
-    310: "TI-310",
-    309: "TI-309",
-    308: "TI-308"
+    # # New tags based on your screenshot
+    # 317: "TI-317",
+    # 316: "TI-316",
+    # 315: "TI-315",
+    # 314: "TI-314",
+    # 313: "TI-313",
+    # 312: "TI-312",
+    # 311: "TI-311",
+    # 310: "TI-310",
+    # 309: "TI-309",
+    # 308: "TI-308",
+    
+    # # Additional tags from your new screenshots
+    # 318: "TI-318",
+    # 319: "TI-319",
+    # 320: "TI-320",
+    # 321: "TI-321",
+    # 322: "TI-322",
+     323: "TI-323"
 }
+
 
 # ==============================================================================
 #  _   _             _
 # | | | | __ _ _ __ | | __
 # | |_| |/ _` | '_ \| |/ /
 # |  _  | (_| | | | |   <
-# |_| |_|\__,_|_| |_|_|\_\
+# |_| |_|\__,_|\__|_|_|\_\
 #
 #  Streamlit App Layout and Logic
 # ==============================================================================
@@ -70,6 +80,10 @@ if 'sync_running' not in st.session_state:
     st.session_state.sync_running = False
 if 'sync_thread' not in st.session_state:
     st.session_state.sync_thread = None
+if 'sync_log' not in st.session_state:
+    st.session_state.sync_log = []
+if 'last_sync_time' not in st.session_state:
+    st.session_state.last_sync_time = "Never"
 
 # Streamlit Page Config
 st.set_page_config(page_title="SCADA SQL to PostgreSQL Sync", layout="centered")
@@ -180,33 +194,39 @@ def get_latest_sql_timestamp(sql_server, sql_db_name, sql_table_name):
         st.error(f"❌ Could not fetch latest timestamp from SQL Server. Error: {e}")
         return None
 
+def _log_message(message):
+    """Thread-safe logging to a Streamlit session state variable."""
+    st.session_state.sync_log.append(f"[{pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}")
+
 # ---------------------------
 # Sync Function (Diagnostic Mode)
 # ---------------------------
 def sync_continuously(config, tag_mapping, password):
     """The main continuous sync loop, now with detailed diagnostics."""
+    _log_message("Starting continuous sync process...")
+    
     while st.session_state.sync_running:
         sql_conn, pg_conn = None, None
         try:
             # Step 1: Connect to SQL Server
             conn_str = f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={config["SQL_SERVER_NAME"]};DATABASE={config["SQL_DB_NAME"]};Trusted_Connection=yes;'
-            st.info("ℹ️ Connecting to SQL Server...")
+            _log_message("ℹ️ Connecting to SQL Server...")
             sql_conn = pyodbc.connect(conn_str)
-            st.success(f"✅ Connected to SQL Server at `{config['SQL_SERVER_NAME']}`.")
+            _log_message(f"✅ Connected to SQL Server at `{config['SQL_SERVER_NAME']}`.")
             sql_cursor = sql_conn.cursor()
 
             # Step 2: Get the latest timestamp from PostgreSQL
-            st.info("ℹ️ Connecting to PostgreSQL to get the latest timestamp...")
+            _log_message("ℹ️ Connecting to PostgreSQL to get the latest timestamp...")
             pg_conn = psycopg2.connect(host=config['PG_HOST'], port=config['PG_PORT'], user=config['PG_USER'], password=password, dbname=config['PG_DB_NAME'])
             pg_cursor = pg_conn.cursor()
             pg_cursor.execute(f"SELECT MAX(DateAndTime) FROM {config['PG_TABLE_NAME']};")
             latest_timestamp = pg_cursor.fetchone()[0]
             
             if latest_timestamp:
-                st.info(f"ℹ️ Latest timestamp in PostgreSQL is: `{latest_timestamp}`.")
+                _log_message(f"ℹ️ Latest timestamp in PostgreSQL is: `{latest_timestamp}`.")
             else:
                 latest_timestamp = '1970-01-01'
-                st.info(f"ℹ️ PostgreSQL table is empty. Starting sync from: `{latest_timestamp}`.")
+                _log_message(f"ℹ️ PostgreSQL table is empty. Starting sync from: `{latest_timestamp}`.")
 
             # Step 3: Query SQL Server for new data
             sql_query = f"""
@@ -215,55 +235,61 @@ def sync_continuously(config, tag_mapping, password):
             WHERE DateAndTime > ?
             ORDER BY DateAndTime ASC;
             """
-            st.info(f"ℹ️ Fetching new data from SQL Server with the query: `WHERE DateAndTime > {latest_timestamp}`.")
+            _log_message(f"ℹ️ Fetching new data from SQL Server with the query: `WHERE DateAndTime > {latest_timestamp}`.")
             sql_cursor.execute(sql_query, latest_timestamp)
             rows = sql_cursor.fetchall()
-            st.info(f"📁 Fetched {len(rows)} rows from SQL Server. Now filtering for relevant tags.")
+            _log_message(f"📁 Fetched {len(rows)} rows from SQL Server.")
 
             if not rows:
-                st.info("📁 No new data found in SQL Server. Waiting for new data...")
+                _log_message("📁 No new data found in SQL Server. Waiting for new data...")
             else:
                 # Step 4: Process and Filter the new data
                 df = pd.DataFrame(rows, columns=["DateAndTime", "TagIndex", "Val"])
+                
+                # Convert TagIndex to int to match the dictionary keys
+                df['TagIndex'] = pd.to_numeric(df['TagIndex'], errors='coerce').astype('Int64')
+                
+                _log_message(f"ℹ️ Now filtering for relevant tags using the `TAG_MAPPING`.")
                 df["TAG"] = df["TagIndex"].map(tag_mapping)
                 # Drop rows where 'TAG' is NaN (i.e., not in our tag_mapping)
                 df.dropna(subset=["TAG"], inplace=True)
                 
                 rows_after_filter = len(df)
-                st.info(f"ℹ️ Filtered down to {rows_after_filter} rows after applying tag mapping. Now pivoting the data.")
+                _log_message(f"ℹ️ Filtered down to {rows_after_filter} rows after applying tag mapping. Now pivoting the data.")
 
                 if rows_after_filter == 0:
-                    st.warning("⚠️ No data found with matching tags to insert. All fetched rows were ignored.")
+                    _log_message("⚠️ No data found with matching tags to insert. All fetched rows were ignored.")
                 else:
                     # Pivot the data to a wide format
                     pivot_df = df.pivot_table(index="DateAndTime", columns="TAG", values="Val", aggfunc='first').reset_index()
 
                     # Step 5: Insert new data into PostgreSQL
-                    st.info(f"ℹ️ Inserting {len(pivot_df)} new row(s) into PostgreSQL.")
-                    for _, row in pivot_df.iterrows():
-                        cols = ','.join(f'"{col}"' for col in row.index)
-                        vals = []
-                        for val in row.values:
-                            if pd.isna(val):
-                                vals.append('NULL')
-                            elif isinstance(val, (int, float)):
-                                vals.append(str(val))
-                            else:
-                                vals.append(f"'{val}'")
-                        vals_str = ','.join(vals)
-                        insert = f'INSERT INTO {config["PG_TABLE_NAME"]} ({cols}) VALUES ({vals_str});'
-                        pg_cursor.execute(insert)
+                    _log_message(f"ℹ️ Inserting {len(pivot_df)} new row(s) into PostgreSQL.")
+                    
+                    # Prepare insert statement
+                    cols = ','.join(f'"{col}"' for col in pivot_df.columns)
+                    insert_query = f"INSERT INTO {config['PG_TABLE_NAME']} ({cols}) VALUES ({','.join(['%s'] * len(pivot_df.columns))})"
+                    
+                    # Create a list of tuples for executemany
+                    data_to_insert = [tuple(row) for row in pivot_df.itertuples(index=False)]
+                    
+                    # Use executemany for efficiency
+                    pg_cursor.executemany(insert_query, data_to_insert)
                     
                     pg_conn.commit()
-                    st.success(f"✅ Synced {len(pivot_df)} new row(s) from SQL Server to PostgreSQL.")
-        
+                    _log_message(f"✅ Synced {len(pivot_df)} new row(s) from SQL Server to PostgreSQL.")
+                    st.session_state.last_sync_time = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
+
         except pyodbc.Error as e:
+            _log_message(f"❌ SQL Server connection failed. Error: {e}")
             st.error(f"❌ SQL Server connection failed. Check your server name, database, and network connectivity. Error: {e}")
             st.session_state.sync_running = False
         except psycopg2.OperationalError as e:
+            _log_message(f"❌ PostgreSQL connection failed. Error: {e}")
             st.error(f"❌ PostgreSQL connection failed. Check your credentials and that the service is running. Error: {e}")
             st.session_state.sync_running = False
         except Exception as e:
+            _log_message(f"❌ A general error occurred: {e}. Stopping sync.")
             st.error(f"❌ A general error occurred: {e}. Stopping sync.")
             st.session_state.sync_running = False
         finally:
@@ -271,7 +297,7 @@ def sync_continuously(config, tag_mapping, password):
             if pg_conn: pg_conn.close()
 
         if st.session_state.sync_running:
-            st.info("💤 Waiting for 60 seconds before the next sync cycle...")
+            _log_message("💤 Waiting for 60 seconds before the next sync cycle...")
             time.sleep(60)
 
 # ==============================================================================
@@ -324,17 +350,38 @@ if latest_sql_ts:
     st.info(f"✅ The latest timestamp found in the SQL Server table is: `{latest_sql_ts}`.")
 else:
     st.warning("⚠️ Could not retrieve the latest timestamp from the SQL Server. The table might be empty or a connection error is occurring.")
+st.markdown("---")
 
-# --- Sync Controls ---
-if st.button("🚀 Start Sync") and not st.session_state.sync_running:
-    if not 'pg_password' in st.session_state:
+# --- Sync Controls & Log ---
+st.header("⚙️ Sync Controls & Status")
+col1, col2, col3 = st.columns(3)
+if col1.button("🚀 Start Sync") and not st.session_state.sync_running:
+    if 'pg_password' not in st.session_state:
         st.error("❌ Please enter your settings and click 'Save Settings' before starting the sync.")
     else:
         st.session_state.sync_running = True
-        st.session_state.sync_thread = threading.Thread(target=sync_continuously, args=(CONFIG, TAG_MAPPING, st.session_state.pg_password))
+        st.session_state.sync_log = [] # Clear the log
+        st.session_state.sync_thread = threading.Thread(target=sync_continuously, args=(CONFIG, TAG_MAPPING, st.session_state.pg_password), daemon=True)
         st.session_state.sync_thread.start()
         st.info("⏳ Sync started...")
 
-if st.button("🛑 Stop Sync") and st.session_state.sync_running:
+if col2.button("🛑 Stop Sync") and st.session_state.sync_running:
     st.session_state.sync_running = False
     st.warning("🛑 Sync stopped.")
+
+if st.session_state.sync_running:
+    st.success("✅ Sync is currently running.")
+else:
+    st.info("ℹ️ Sync is currently stopped.")
+
+st.markdown("---")
+st.subheader(f"📊 Last Successful Sync: {st.session_state.last_sync_time}")
+st.subheader("📝 Live Sync Log")
+sync_log_container = st.container()
+with sync_log_container:
+    st.text_area("Log Output", "\n".join(st.session_state.sync_log), height=400)
+
+# Rerun the app to update the log
+if st.session_state.sync_running:
+    time.sleep(1)
+    st.experimental_rerun()
