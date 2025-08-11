@@ -3,24 +3,23 @@ import time
 import os
 from typing import List, Dict, Any
 from psycopg import connect, sql, OperationalError
-import sqlite3
+import pyodbc  # Using pyodbc for SQL Server as per previous discussion
 
 # --- Configuration and Best Practices ---
-# Use environment variables for sensitive credentials
+# Use environment variables for sensitive credentials.
+# Make sure to set these in your system before running the script.
 POSTGRES_HOST = os.environ.get("PG_HOST", "localhost")
 POSTGRES_DB = os.environ.get("PG_DB", "your_database_name")
 POSTGRES_USER = os.environ.get("PG_USER", "your_username")
 POSTGRES_PASSWORD = os.environ.get("PG_PASSWORD", "your_password")
 
 # The name of the table in your source and destination databases
-SOURCE_TABLE = "source_data"
+# Note: "dbo.FloatTable" is a SQL Server name, so we use it here.
+SOURCE_TABLE = "dbo.FloatTable"
 DESTINATION_TABLE = "destination_data"
 
 # The column that holds the tag index for mapping
 TAG_INDEX_COLUMN = "tag_index"
-
-# The interval in seconds to wait between sync cycles
-SYNC_INTERVAL = 60  # Sync every 1 minute
 
 def load_config() -> Dict[str, Any]:
     """
@@ -34,10 +33,10 @@ def load_config() -> Dict[str, Any]:
             return json.load(f)
     except FileNotFoundError:
         print("Error: config.json file not found. Exiting.")
-        exit()
+        return {} # Return an empty dict to prevent crash
     except json.JSONDecodeError:
         print("Error: Invalid JSON in config.json. Please check for syntax errors.")
-        exit()
+        return {}
 
 def connect_to_postgres():
     """
@@ -59,34 +58,37 @@ def connect_to_postgres():
         print(f"Error connecting to PostgreSQL: {e}")
         return None
 
-def connect_to_source_db():
+def connect_to_source_db(sql_server_config: Dict[str, str]):
     """
-    Establishes a connection to the source SQL database.
-    This example uses an in-memory SQLite database for simplicity.
-    In a real-world scenario, you would replace this with your actual database connector.
+    Establishes a connection to the source SQL Server database.
+    
+    Args:
+        sql_server_config (Dict[str, str]): The configuration dictionary for SQL Server.
 
     Returns:
-        sqlite3.Connection: A database connection object, or None if the connection fails.
+        pyodbc.Connection: A database connection object, or None if the connection fails.
     """
     try:
-        conn = sqlite3.connect(":memory:") # Example for an in-memory db
-        # Create a dummy table and some data for demonstration
-        cursor = conn.cursor()
-        cursor.execute(f"CREATE TABLE IF NOT EXISTS {SOURCE_TABLE} (id INTEGER PRIMARY KEY, {TAG_INDEX_COLUMN} TEXT, value TEXT)")
-        cursor.execute(f"INSERT INTO {SOURCE_TABLE} (id, {TAG_INDEX_COLUMN}, value) VALUES (1, '1', 'Initial data point')")
-        conn.commit()
-        print("Successfully connected to source SQLite DB.")
+        cnxn_string = (
+            f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+            f"SERVER={sql_server_config['server']};"
+            f"DATABASE={sql_server_config['database']};"
+            f"UID={sql_server_config['user']};"
+            f"PWD={sql_server_config['password']}"
+        )
+        conn = pyodbc.connect(cnxn_string)
+        print("Successfully connected to source SQL Server DB.")
         return conn
-    except sqlite3.OperationalError as e:
-        print(f"Error connecting to source database: {e}")
+    except Exception as e:
+        print(f"Error connecting to source SQL Server database: {e}")
         return None
 
-def get_source_data(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+def get_source_data(conn: pyodbc.Connection) -> List[Dict[str, Any]]:
     """
     Fetches all data from the source database.
     
     Args:
-        conn (sqlite3.Connection): The connection object for the source database.
+        conn (pyodbc.Connection): The connection object for the source database.
     
     Returns:
         List[Dict[str, Any]]: A list of dictionaries, where each dictionary
@@ -96,7 +98,7 @@ def get_source_data(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     cursor.execute(f"SELECT * FROM {SOURCE_TABLE}")
     
     # Get column names to create a dictionary for each row
-    columns = [desc[0] for desc in cursor.description]
+    columns = [column[0] for column in cursor.description]
     data = [dict(zip(columns, row)) for row in cursor.fetchall()]
     
     return data
@@ -113,10 +115,11 @@ def upsert_data_to_postgres(conn: connect, data: List[Dict[str, Any]], tag_mappi
     try:
         with conn.cursor() as cursor:
             for row in data:
-                tag_index = row.get(TAG_INDEX_COLUMN)
+                # Convert the tag index to a string for mapping
+                tag_index_str = str(row.get(TAG_INDEX_COLUMN))
                 
                 # Map the tag index to the full tag name from config.json
-                tag_name = tag_mapping.get(tag_index, 'unknown')
+                tag_name = tag_mapping.get(tag_index_str, 'unknown')
                 
                 # Assume a simple schema for the destination table
                 # (id, original_tag_index, mapped_tag_name, value)
@@ -138,7 +141,7 @@ def upsert_data_to_postgres(conn: connect, data: List[Dict[str, Any]], tag_mappi
                 """).format(table=sql.Identifier(DESTINATION_TABLE))
                 
                 # Execute the query with the mapped data
-                cursor.execute(upsert_query, (id_value, tag_index, tag_name, other_value))
+                cursor.execute(upsert_query, (id_value, tag_index_str, tag_name, other_value))
                 print(f"Upserted row with id: {id_value}, mapped tag: {tag_name}")
             
             # Commit the transaction after all upserts are complete
@@ -148,50 +151,43 @@ def upsert_data_to_postgres(conn: connect, data: List[Dict[str, Any]], tag_mappi
         print(f"An error occurred during upsert operation: {e}")
         conn.rollback() # Roll back any changes if an error occurred
 
-def main():
+def run_sync_cycle():
     """
-    Main function to run the continuous data synchronization process.
+    Performs a single data synchronization cycle.
     """
-    print("Starting continuous data synchronization process...")
-    
-    # Load configuration once
+    print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Sync cycle starting...")
+
     config = load_config()
     tag_mapping = config.get("tag_mapping", {})
+    sql_server_config = config.get("sql_server", {})
+
+    source_conn = None
+    postgres_conn = None
+    try:
+        source_conn = connect_to_source_db(sql_server_config)
+        postgres_conn = connect_to_postgres()
+        
+        if source_conn and postgres_conn:
+            source_data = get_source_data(source_conn)
+            
+            if not source_data:
+                print("No new data found in source database.")
+            else:
+                print(f"Found {len(source_data)} rows to process.")
+                upsert_data_to_postgres(postgres_conn, source_data, tag_mapping)
+
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+    finally:
+        if source_conn:
+            source_conn.close()
+        if postgres_conn:
+            postgres_conn.close()
     
-    while True:
-        source_conn = None
-        postgres_conn = None
-        try:
-            # Connect to both databases
-            source_conn = connect_to_source_db()
-            postgres_conn = connect_to_postgres()
-            
-            if source_conn and postgres_conn:
-                print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Sync cycle starting...")
-                
-                # Get data from the source database
-                source_data = get_source_data(source_conn)
-                
-                if not source_data:
-                    print("No new data found in source database.")
-                else:
-                    print(f"Found {len(source_data)} rows to process.")
-                    
-                    # Upsert the data into PostgreSQL
-                    upsert_data_to_postgres(postgres_conn, source_data, tag_mapping)
+    print(f"Sync cycle complete.")
 
-        except Exception as e:
-            print(f"An unexpected error occurred: {e}")
-        finally:
-            # Ensure database connections are always closed
-            if source_conn:
-                source_conn.close()
-            if postgres_conn:
-                postgres_conn.close()
-            
-            # Wait for the next sync cycle
-            print(f"Sync cycle complete. Waiting for {SYNC_INTERVAL} seconds...")
-            time.sleep(SYNC_INTERVAL)
-
+# If you want to run this in an interactive window, just call the function.
+# This code block will run the sync once when the script is executed.
 if __name__ == "__main__":
-    main()
+    run_sync_cycle()
+    print("Script finished. To run again in an interactive window, call run_sync_cycle().")
