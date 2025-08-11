@@ -1,25 +1,16 @@
 {
-    // --- SQL Server Database Connection Details ---
-    // Replace these placeholder values with your actual SQL Server credentials.
     "sql_server": {
         "server": "DESKTOP-DG1Q26L\\SQLEXPRESS",
         "database": "JSCPL",
         "user": "postgres",
         "password": "your_sql_password"
     },
-
-    // --- PostgreSQL Database Connection Details ---
-    // Replace these placeholder values with your actual PostgreSQL credentials.
     "postgres": {
         "host": "your_postgres_host_address",
         "database": "your_postgres_database_name",
         "user": "your_postgres_username",
         "password": "your_postgres_password"
     },
-
-    // --- Data Tag Mapping ---
-    // This section maps the existing Tag Index to the new Tag name.
-    // The keys are the Tag Index, and the values are the new Tag names.
     "tag_mapping": {
         "251": "TI-31",
         "253": "TI-32",
@@ -53,4 +44,3 @@
         "37": "FT-04"
     }
 }
-
