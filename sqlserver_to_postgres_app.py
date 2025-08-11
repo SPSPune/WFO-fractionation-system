@@ -7,7 +7,7 @@ import time
 import sys
 import pyodbc
 import re
-from psycopg2.errors import DuplicateDatabase, OperationalError as Psycopg2OperationalError
+from psycopg2.errors import OperationalError as Psycopg2OperationalError
 from pyodbc import OperationalError as PyodbcOperationalError
 
 # ==============================================================================
@@ -15,7 +15,7 @@ from pyodbc import OperationalError as PyodbcOperationalError
 # | |__  ___| |_ _  _ __ _| |_ ___| |__
 # | '_ \/ _ \ __| | | |/ _` | __/ __| '_ \
 # | |_) |  __/ |_| |_| | (_| | | |__ \ | | |
-# |_.__/\___|\__|\__,_|\__|___/_| |_|
+# |_.__/\___|\__|\__|___/_| |_|
 #
 # Edit these values to configure your application
 # ==============================================================================
@@ -31,9 +31,6 @@ CONFIG = {
     "PG_TABLE_NAME": "scada_data"
 }
 
-# The dictionary of TagIndex numbers to their friendly names.
-# This mapping is no longer used for the sync process itself, but is included
-# for future use in the analysis portion of the Streamlit app.
 TAG_MAPPING = {
     # Existing tags
     251: "TI-31", 253: "TI-32", 254: "TI-33", 255: "TI-35", 256: "TI-35-A",
@@ -195,7 +192,7 @@ def _log_message(message):
 # ---------------------------
 # Sync Function (Diagnostic Mode) - REVISED
 # ---------------------------
-def sync_continuously_revised(config, password):
+def sync_continuously(config, password):
     """The main continuous sync loop, now with a direct insert approach."""
     _log_message("Starting continuous sync process...")
     
@@ -206,11 +203,20 @@ def sync_continuously_revised(config, password):
             conn_str = f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={config["SQL_SERVER_NAME"]};DATABASE={config["SQL_DB_NAME"]};Trusted_Connection=yes;'
             sql_conn = pyodbc.connect(conn_str)
             sql_cursor = sql_conn.cursor()
+            _log_message("✅ Connected to SQL Server.")
             
-            # Step 2: Get the latest timestamp from PostgreSQL's raw table
-            _log_message("ℹ️ Connecting to PostgreSQL to get the latest timestamp...")
-            pg_conn = psycopg2.connect(host=config['PG_HOST'], port=config['PG_PORT'], user=config['PG_USER'], password=password, dbname=config['PG_DB_NAME'])
-            pg_cursor = pg_conn.cursor()
+            # Step 2: Connect to PostgreSQL and get the latest timestamp
+            _log_message("ℹ️ Attempting to connect to PostgreSQL...")
+            try:
+                pg_conn = psycopg2.connect(host=config['PG_HOST'], port=config['PG_PORT'], user=config['PG_USER'], password=password, dbname=config['PG_DB_NAME'])
+                pg_cursor = pg_conn.cursor()
+                _log_message("✅ Connected to PostgreSQL.")
+            except Exception as e:
+                _log_message(f"❌ PostgreSQL connection failed. Error: {e}")
+                st.error(f"❌ PostgreSQL connection failed. Check your credentials and that the service is running. Error: {e}")
+                st.session_state.sync_running = False
+                return # Exit the function on failure
+
             pg_cursor.execute(f"SELECT MAX(DateAndTime) FROM {config['PG_TABLE_NAME']};")
             latest_timestamp = pg_cursor.fetchone()[0] or pd.Timestamp('1970-01-01')
             _log_message(f"ℹ️ Latest timestamp in PostgreSQL is: `{latest_timestamp}`.")
@@ -240,8 +246,8 @@ def sync_continuously_revised(config, password):
                 st.session_state.last_sync_time = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
 
         except Exception as e:
-            _log_message(f"❌ An error occurred: {e}. Stopping sync.")
-            st.error(f"❌ An error occurred: {e}. Stopping sync.")
+            _log_message(f"❌ A general error occurred: {e}. Stopping sync.")
+            st.error(f"❌ A general error occurred: {e}. Stopping sync.")
             st.session_state.sync_running = False
         finally:
             if sql_conn: sql_conn.close()
@@ -265,10 +271,8 @@ except ImportError:
 # --- DB Setup ---
 if submitted:
     st.session_state.pg_password = password
-    # Call the new table creation function
     if create_database_if_not_exists(host, port, user, st.session_state.pg_password, db_name):
         create_raw_table_if_not_exists(host, port, user, st.session_state.pg_password, db_name, pg_table_name)
-    # Re-fetch config from the form for the main part of the app
     CONFIG['SQL_SERVER_NAME'] = sql_server
     CONFIG['SQL_DB_NAME'] = sql_db_name
     CONFIG['SQL_TABLE_NAME'] = sql_table_name
@@ -311,7 +315,7 @@ if col1.button("🚀 Start Sync") and not st.session_state.sync_running:
     else:
         st.session_state.sync_running = True
         st.session_state.sync_log = []
-        st.session_state.sync_thread = threading.Thread(target=sync_continuously_revised, args=(CONFIG, st.session_state.pg_password), daemon=True)
+        st.session_state.sync_thread = threading.Thread(target=sync_continuously, args=(CONFIG, st.session_state.pg_password), daemon=True)
         st.session_state.sync_thread.start()
         st.info("⏳ Sync started...")
 
