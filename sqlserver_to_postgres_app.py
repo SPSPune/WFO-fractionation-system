@@ -20,9 +20,10 @@ from pyodbc import OperationalError as PyodbcOperationalError, ProgrammingError 
 # Use a default config, but the Streamlit form will override this
 CONFIG = {
     "SQL_SERVER_NAME": r"DESKTOP-DG1Q26L\SQLEXPRESS",
-    "SQL_DB_NAME": "JSCPL",
+    "SQL_SOURCE_DB_NAME": "JSCPL",
+    "SQL_DEST_DB_NAME": "PivotedDataDB",
     "SQL_TABLE_NAME_RAW": "dbo.FloatTable",
-    "SQL_TABLE_NAME_PIVOTED": "dbo.PivotedData"  # New target table name for SQL Server
+    "SQL_TABLE_NAME_PIVOTED": "dbo.PivotedData"
 }
 
 TAG_MAPPING = {
@@ -75,10 +76,16 @@ st.sidebar.header("🔧 Sync Settings")
 with st.sidebar.form("connection_form"):
     st.subheader("SQL Server Details")
     sql_server = st.text_input("SQL Server Name", value=CONFIG["SQL_SERVER_NAME"], help="The server where your SCADA data is located.")
-    # This is the new database name the user wants to use
-    sql_db_name = st.text_input("SQL Server Database Name", value=CONFIG["SQL_DB_NAME"], help="The name of the database to use or create.")
+    
+    st.markdown("---")
+    st.subheader("Source Details")
+    sql_source_db_name = st.text_input("Source Database Name", value=CONFIG["SQL_SOURCE_DB_NAME"], help="The name of the database that contains the raw data.")
     sql_table_name_raw = st.text_input("Source Raw Table Name", value=CONFIG["SQL_TABLE_NAME_RAW"], help="The name of the raw data table.")
-    sql_table_name_pivoted = st.text_input("Target Pivoted Table Name", value=CONFIG["SQL_TABLE_NAME_PIVOTED"], help="The name of the table to store the pivoted data.")
+    
+    st.markdown("---")
+    st.subheader("Destination Details")
+    sql_dest_db_name = st.text_input("Destination Database Name", value=CONFIG["SQL_DEST_DB_NAME"], help="The name of the database to use for the pivoted data. Will be created if it doesn't exist.")
+    sql_table_name_pivoted = st.text_input("Destination Pivoted Table Name", value=CONFIG["SQL_TABLE_NAME_PIVOTED"], help="The name of the table to store the pivoted data.")
 
     submitted = st.form_submit_button("✅ Save Settings and Initialize")
 
@@ -111,9 +118,11 @@ def create_sqlserver_database_if_not_exists(sql_server, db_name):
         return True
     except PyodbcOperationalError as e:
         st.error(f"❌ Could not connect to SQL Server to create the database. Check your connection details and permissions. Error: {e}")
+        _log_message(f"❌ Error creating database: {e}")
         return False
     except Exception as e:
         st.error(f"❌ An error occurred during database creation. Error: {e}")
+        _log_message(f"❌ Error creating database: {e}")
         return False
     finally:
         if conn:
@@ -148,9 +157,11 @@ def create_sql_pivoted_table_if_not_exists(sql_server, sql_db_name, table_name):
         return True
     except PyodbcOperationalError as e:
         st.error(f"❌ Could not connect to SQL Server to create the pivoted table. Check your connection details and permissions. Error: {e}")
+        _log_message(f"❌ Error creating table: {e}")
         return False
     except Exception as e:
         st.error(f"❌ An error occurred during pivoted table creation. Error: {e}")
+        _log_message(f"❌ Error creating table: {e}")
         return False
     finally:
         if conn:
@@ -170,10 +181,10 @@ def get_latest_sql_timestamp(sql_server, sql_db_name, sql_table_name):
             return pd.Timestamp('1970-01-01')
         return df.iloc[0, 0]
     except (PyodbcOperationalError, PyodbcProgrammingError) as e:
-        st.error(f"❌ Could not fetch latest timestamp from SQL Server. Check your server name and database permissions. Error: {e}")
+        # Don't show an error here, as the table may not exist yet which is expected
         return None
     except Exception as e:
-        st.error(f"❌ An unexpected error occurred while fetching the latest timestamp from SQL Server. Error: {e}")
+        _log_message(f"❌ An unexpected error occurred while fetching the latest timestamp from SQL Server. Error: {e}")
         return None
     finally:
         if conn:
@@ -193,17 +204,17 @@ def sync_continuously(config):
     while st.session_state.sync_running:
         sql_conn_read, sql_conn_write = None, None
         try:
-            # Step 1: Get the latest timestamp from the pivoted SQL Server table
+            # Step 1: Get the latest timestamp from the destination pivoted SQL Server table
             latest_timestamp = get_latest_sql_timestamp(
-                config['SQL_SERVER_NAME'], config['SQL_DB_NAME'], config['SQL_TABLE_NAME_PIVOTED']
+                config['SQL_SERVER_NAME'], config['SQL_DEST_DB_NAME'], config['SQL_TABLE_NAME_PIVOTED']
             ) or pd.Timestamp('1970-01-01')
             
-            _log_message(f"ℹ️ Latest pivoted timestamp in SQL Server is: `{latest_timestamp}`.")
+            _log_message(f"ℹ️ Latest pivoted timestamp in destination SQL Server is: `{latest_timestamp}`.")
 
-            # Step 2: Connect to SQL Server and fetch new raw data
-            _log_message(f"ℹ️ Fetching new raw data from SQL Server since `{latest_timestamp}`.")
-            conn_str = f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={config["SQL_SERVER_NAME"]};DATABASE={config["SQL_DB_NAME"]};Trusted_Connection=yes;'
-            sql_conn_read = pyodbc.connect(conn_str)
+            # Step 2: Connect to the source SQL Server and fetch new raw data
+            _log_message(f"ℹ️ Fetching new raw data from source SQL Server since `{latest_timestamp}`.")
+            conn_str_read = f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={config["SQL_SERVER_NAME"]};DATABASE={config["SQL_SOURCE_DB_NAME"]};Trusted_Connection=yes;'
+            sql_conn_read = pyodbc.connect(conn_str_read)
             sql_query = f"""
             SELECT DateAndTime, TagIndex, Val
             FROM {config['SQL_TABLE_NAME_RAW']}
@@ -213,7 +224,7 @@ def sync_continuously(config):
             
             raw_df = pd.read_sql(sql_query, sql_conn_read, params=[latest_timestamp])
             
-            _log_message(f"📁 Fetched {len(raw_df)} new raw rows from SQL Server.")
+            _log_message(f"📁 Fetched {len(raw_df)} new raw rows from source SQL Server.")
 
             if raw_df.empty:
                 _log_message("📁 No new data found. Waiting for new data...")
@@ -242,9 +253,10 @@ def sync_continuously(config):
 
                 pivoted_df = pivoted_df[['DateAndTime'] + tag_columns]
 
-                # Step 4: Insert the pivoted data into a new SQL Server table
-                _log_message(f"ℹ️ Inserting {len(pivoted_df)} new pivoted rows into SQL Server.")
-                sql_conn_write = pyodbc.connect(conn_str)
+                # Step 4: Insert the pivoted data into the destination SQL Server table
+                _log_message(f"ℹ️ Inserting {len(pivoted_df)} new pivoted rows into destination SQL Server.")
+                conn_str_write = f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={config["SQL_SERVER_NAME"]};DATABASE={config["SQL_DEST_DB_NAME"]};Trusted_Connection=yes;'
+                sql_conn_write = pyodbc.connect(conn_str_write)
                 cursor = sql_conn_write.cursor()
 
                 # Build the INSERT statement dynamically
@@ -270,7 +282,7 @@ def sync_continuously(config):
                 if new_rows_to_insert:
                     cursor.executemany(insert_query, new_rows_to_insert)
                     sql_conn_write.commit()
-                    _log_message(f"✅ Synced {len(new_rows_to_insert)} new pivoted row(s) to SQL Server.")
+                    _log_message(f"✅ Synced {len(new_rows_to_insert)} new pivoted row(s) to destination SQL Server.")
                 else:
                     _log_message("ℹ️ No new pivoted rows to insert after checking for existing data.")
 
@@ -301,13 +313,14 @@ except ImportError:
 
 # --- DB Setup ---
 if submitted:
-    # First, try to create the new database
-    if create_sqlserver_database_if_not_exists(sql_server, sql_db_name):
+    # First, try to create the new destination database
+    if create_sqlserver_database_if_not_exists(sql_server, sql_dest_db_name):
         # If the database is successfully created or already exists, proceed to create the table
-        create_sql_pivoted_table_if_not_exists(sql_server, sql_db_name, sql_table_name_pivoted)
+        create_sql_pivoted_table_if_not_exists(sql_server, sql_dest_db_name, sql_table_name_pivoted)
         # Update the config with the new user-defined values
         CONFIG['SQL_SERVER_NAME'] = sql_server
-        CONFIG['SQL_DB_NAME'] = sql_db_name
+        CONFIG['SQL_SOURCE_DB_NAME'] = sql_source_db_name
+        CONFIG['SQL_DEST_DB_NAME'] = sql_dest_db_name
         CONFIG['SQL_TABLE_NAME_RAW'] = sql_table_name_raw
         CONFIG['SQL_TABLE_NAME_PIVOTED'] = sql_table_name_pivoted
     st.rerun()
@@ -315,27 +328,31 @@ if submitted:
 # --- Live Data Diagnostic ---
 st.header("🩺 Live Data Diagnostic")
 st.info("ℹ️ This section shows the most recent timestamp in your raw and pivoted SQL Server databases to confirm the sync is working.")
-latest_sql_raw_ts = get_latest_sql_timestamp(CONFIG['SQL_SERVER_NAME'], CONFIG['SQL_DB_NAME'], CONFIG['SQL_TABLE_NAME_RAW'])
-latest_sql_pivoted_ts = get_latest_sql_timestamp(CONFIG['SQL_SERVER_NAME'], CONFIG['SQL_DB_NAME'], CONFIG['SQL_TABLE_NAME_PIVOTED'])
+latest_sql_raw_ts = get_latest_sql_timestamp(CONFIG['SQL_SERVER_NAME'], CONFIG['SQL_SOURCE_DB_NAME'], CONFIG['SQL_TABLE_NAME_RAW'])
+latest_sql_pivoted_ts = get_latest_sql_timestamp(CONFIG['SQL_SERVER_NAME'], CONFIG['SQL_DEST_DB_NAME'], CONFIG['SQL_TABLE_NAME_PIVOTED'])
 if latest_sql_raw_ts:
-    st.info(f"✅ The latest timestamp found in the **raw** SQL Server table is: `{latest_sql_raw_ts}`.")
+    st.info(f"✅ The latest timestamp found in the **source raw** SQL Server table is: `{latest_sql_raw_ts}`.")
 else:
-    st.warning("⚠️ Could not retrieve the latest timestamp from the raw SQL Server table. Check your connection settings.")
+    st.warning("⚠️ Could not retrieve the latest timestamp from the source raw SQL Server table. Check your connection settings.")
 st.markdown("---")
 if latest_sql_pivoted_ts:
-    st.info(f"✅ The latest timestamp found in the **pivoted** SQL Server table is: `{latest_sql_pivoted_ts}`.")
+    st.info(f"✅ The latest timestamp found in the **destination pivoted** SQL Server table is: `{latest_sql_pivoted_ts}`.")
 else:
-    st.warning("⚠️ The pivoted SQL Server table may be empty or not yet created. The sync process will create it.")
+    st.warning("⚠️ The destination pivoted SQL Server table may be empty or not yet created. The sync process will create it.")
 
 # --- Sync Controls & Log ---
 st.header("⚙️ Sync Controls & Status")
-col1, col2, col3 = st.columns(3)
+col1, col2 = st.columns(2)
 if col1.button("🚀 Start Sync") and not st.session_state.sync_running:
-    st.session_state.sync_running = True
-    st.session_state.sync_log = []
-    st.session_state.sync_thread = threading.Thread(target=sync_continuously, args=(CONFIG,), daemon=True)
-    st.session_state.sync_thread.start()
-    st.info("⏳ Sync started...")
+    # Validate that all required fields are filled before starting the sync
+    if not CONFIG['SQL_SERVER_NAME'] or not CONFIG['SQL_SOURCE_DB_NAME'] or not CONFIG['SQL_DEST_DB_NAME'] or not CONFIG['SQL_TABLE_NAME_RAW'] or not CONFIG['SQL_TABLE_NAME_PIVOTED']:
+        st.error("❌ Please fill in all the required database and table names in the sidebar before starting the sync.")
+    else:
+        st.session_state.sync_running = True
+        st.session_state.sync_log = []
+        st.session_state.sync_thread = threading.Thread(target=sync_continuously, args=(CONFIG,), daemon=True)
+        st.session_state.sync_thread.start()
+        st.info("⏳ Sync started...")
 
 if col2.button("🛑 Stop Sync") and st.session_state.sync_running:
     st.session_state.sync_running = False
